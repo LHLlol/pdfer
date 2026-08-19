@@ -1,44 +1,71 @@
-# 纸落 — 文件工具
+纸落 · ZhiLuo
 
-一个安静、轻量的浏览器端文件工具，支持本地合并、压缩 PDF，以及 Word / PDF / 图片格式转换。文件只在当前设备中读取和处理，无需账号，也不会上传到服务器。
+纸落（ZhiLuo）是一个轻量的浏览器端文件工具，支持 PDF 合并、PDF 压缩，以及 Word、PDF 和图片之间的格式转换。
+
+所有文件均在当前设备的浏览器中读取和处理，无需注册账号，也不会上传到服务器。
 
 ## 功能
 
-- **合并 PDF**
-  - 一次选择多个 PDF 文件
-  - 拖拽或点击添加文件
-  - 拖动调整文件顺序
-  - 显示文件页数和大小
-  - 输出 `merged.pdf`
-- **压缩 PDF**
-  - 一次处理一个 PDF 文件
-  - 设置目标大小，支持 KB / MB
-  - 提供轻度、中度、强力三档快捷目标
-  - 显示压缩前后体积和减少比例
-  - 输出 `<原文件名>-compressed.pdf`
-- **格式转换**
-  - 接受 `.docx`、PDF、PNG、JPG、WebP 等文件
-  - Word 转 PDF 或逐页 PNG 图片
-  - PDF 转逐页 PNG 图片
-  - 图片转 PDF 或 PNG 图片
-  - 多页图片会打包为一个 ZIP 下载
-- 拖拽上传、键盘操作和基础错误提示
-- 单文件最大支持 `500 MB`
+### 合并 PDF
+
+- 一次选择多个 PDF 文件
+- 支持拖拽添加和拖动排序
+- 显示文件大小与页数
+- 保持文件列表顺序并输出合并后的 PDF
+
+### 压缩 PDF
+
+- 一次处理一个 PDF
+- 支持设置 KB / MB 目标大小
+- 提供轻度、中度、强力三档快捷目标
+- 显示压缩前后大小与体积变化
+
+### 格式转换
+
+- Word（`.docx`）转 PDF 或逐页 PNG
+- PDF 转逐页 PNG
+- PNG、JPG、WebP 等图片转 PDF 或 PNG
+- 多页图片自动打包为 ZIP
+
+## 隐私与处理边界
+
+- 文件处理全部在浏览器端完成，不上传服务器
+- 单个文件最大支持 `500 MB`
+- 暂不支持有密码保护的 PDF
+- 暂不支持旧版二进制 `.doc` 文件，请先另存为 `.docx`
+- 复杂 Word 特性（宏、批注、嵌入对象和部分高级版式）可能与桌面 Word 存在差异
+- PDF 压缩效果取决于原文件结构和图片内容，不保证所有文件都能达到目标大小
+- 刷新页面后，当前任务和文件列表不会保留
+
+## 品牌图标
+
+网站使用黑色圆润几何风格的 ZhiLuo 字标，背景为暖米白色。
+
+图标资源位于 `public/zhiluo-icons/`：
+
+- `favicon.svg` / `favicon.ico`：浏览器图标
+- `icon-16.png`、`icon-32.png`、`icon-48.png`：常规 favicon 尺寸
+- `apple-touch-icon.png`：Apple Touch Icon
+- `icon-192.png`、`icon-512.png`：PWA 图标
+- `icon-512-maskable.png`：支持安全区域裁切的 PWA 图标
+- `zhiluo-mark-ai-v1.png`：方形 Z 图标
+- `zhiluo-wordmark-ai-v1-cropped.png`：横向 ZhiLuo 字标
+
+页面顶部品牌标记和 `index.html` 中的 favicon、Apple Touch Icon、PWA manifest 已统一使用这套图标。
 
 ## 技术栈
 
-- React 18
-- TypeScript
+- React 18 + TypeScript
 - Vite
-- `pdf-lib`：PDF 读取、页面复制与保存
-- `mammoth`：Word `.docx` 转 HTML
-- `html2canvas`：将 Word 页面渲染为图片
+- `pdf-lib`：PDF 读取、合并与保存
+- `pdfjs-dist`：PDF 页面渲染
+- `mammoth`：`.docx` 内容读取
+- `html2canvas`：Word 页面图片渲染
 - `jspdf`：生成 PDF
-- `pdfjs-dist`：将 PDF 页面渲染为图片
 - `jszip`：打包多页图片
 - `@dnd-kit`：文件列表拖拽排序
-- Framer Motion：界面过渡动画
-- Lucide React：图标
+- Framer Motion：界面动效
+- Lucide React：功能操作图标
 
 ## 快速开始
 
@@ -59,7 +86,7 @@ npm install
 npm run dev
 ```
 
-启动后打开终端提示的本地地址，通常是 `http://localhost:5173`。
+启动后访问终端输出的本地地址，通常为 `http://localhost:5173`。
 
 ### 构建生产版本
 
@@ -67,7 +94,7 @@ npm run dev
 npm run build
 ```
 
-构建产物会输出到 `dist/` 目录。
+构建产物输出到 `dist/` 目录。
 
 ### 预览生产版本
 
@@ -75,54 +102,22 @@ npm run build
 npm run preview
 ```
 
-## 使用说明
-
-### 合并 PDF
-
-1. 保持在“合并 PDF”模式。
-2. 拖入或选择至少两个 PDF 文件。
-3. 在文件列表中拖动调整顺序。
-4. 点击“合并 PDF”。
-5. 处理完成后点击“下载 PDF”。
-
-### 压缩 PDF
-
-1. 切换到“压缩 PDF”模式。
-2. 选择一个 PDF 文件。
-3. 输入目标大小，或选择一个快捷目标。
-4. 点击“压缩 PDF”。
-5. 处理完成后点击“下载 PDF”。
-
-### 格式转换
-
-1. 切换到“格式转换”模式。
-2. 拖入或选择一个 `.docx`、PDF 或图片文件。
-3. 选择输出为 PDF 或图片。
-4. 点击“转换为 PDF”或“转换为图片”。多页图片会自动下载为 ZIP。
-
 ## 项目结构
 
 ```text
 .
-├── index.html          # HTML 入口
+├── index.html
 ├── src/
-│   ├── App.tsx         # 页面、交互与 PDF 处理逻辑
-│   ├── main.tsx        # React 挂载入口
-│   └── styles.css      # 页面样式与响应式布局
-├── package.json        # 脚本与依赖
-├── tsconfig*.json      # TypeScript 配置
-└── vite.config.ts      # Vite 配置
+│   ├── App.tsx          # 页面结构、交互和文件处理逻辑
+│   ├── main.tsx         # React 挂载入口
+│   └── styles.css       # 页面样式和响应式布局
+├── public/
+│   └── zhiluo-icons/    # favicon、PWA 和品牌图标资源
+├── package.json
+├── package-lock.json
+├── tsconfig*.json
+└── vite.config.ts
 ```
-
-## 处理边界
-
-- 合并和压缩模式仅接受 PDF；格式转换模式接受 `.docx`、PDF、PNG、JPG、WebP 等文件，单个文件不能超过 `500 MB`。
-- 当前浏览器端转换支持 `.docx`，旧版二进制 `.doc` 需要先在 Word 中另存为 `.docx`。
-- 暂不支持有密码保护的 PDF。
-- 合并会保留页面顺序，并复制各源 PDF 的页面内容。
-- 压缩主要通过重新保存和优化 PDF 结构实现；对于已经高度优化或主要由图片构成的 PDF，输出文件不一定能达到目标大小。
-- Word 转换基于浏览器排版结果，复杂 Word 特性（宏、批注、嵌入对象、部分高级版式）可能与桌面 Word 有差异。
-- 所有处理均在浏览器中完成，刷新页面后当前任务不会保留。
 
 ## 开发命令
 
@@ -132,6 +127,3 @@ npm run preview
 | `npm run build` | 类型检查并构建生产版本 |
 | `npm run preview` | 预览生产构建 |
 
-## 许可证
-
-当前项目未声明开源许可证。如需公开发布，请根据实际使用场景补充许可证信息。
