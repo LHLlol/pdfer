@@ -6,17 +6,20 @@ import {
   Check,
   ChevronDown,
   CircleAlert,
+  Clock3,
+  Combine,
   Download,
   FileImage,
+  FileOutput,
   FileType2,
   FileText,
   GripVertical,
   HardDrive,
   Image as ImageIcon,
+  Minimize2,
   Plus,
   RotateCcw,
   ShieldCheck,
-  Sparkles,
   UploadCloud,
   X,
 } from 'lucide-react';
@@ -111,6 +114,7 @@ const PAGE_HEIGHT = 1123;
 const PAGE_PADDING = 76;
 
 const ease = [0.22, 1, 0.36, 1] as const;
+const PROGRESS_SEGMENT_COUNT = 20;
 
 function formatBytes(bytes: number, compact = false) {
   if (bytes < KILOBYTE) return `${bytes} 字节`;
@@ -227,16 +231,34 @@ function bytesToArrayBuffer(bytes: Uint8Array) {
 async function createMergedPdf(items: PdfItem[], onProgress: (value: number) => void) {
   const merged = await PDFDocument.create();
   for (let index = 0; index < items.length; index += 1) {
-    const source = await PDFDocument.load(await items[index].file.arrayBuffer(), {
+    const sourceBytes = await items[index].file.arrayBuffer();
+    let source = await PDFDocument.load(sourceBytes, {
       updateMetadata: false,
     });
+
+    // A widget annotation (for example, a filled text box) points back to
+    // fields in the source document's AcroForm. Copying the page alone leaves
+    // those references attached to the new page, which can make the merged
+    // file fail in later PDF readers/processors. Flatten existing appearances
+    // before copying so the entered content becomes ordinary page content.
+    try {
+      const form = source.getForm();
+      if (form.getFields().length > 0) {
+        form.flatten({ updateFieldAppearances: false });
+      }
+    } catch {
+      // Some third-party PDFs have incomplete form metadata. Keep the normal
+      // page-copy path as a compatibility fallback for those files.
+      source = await PDFDocument.load(sourceBytes, { updateMetadata: false });
+    }
+
     const copiedPages = await merged.copyPages(source, source.getPageIndices());
     copiedPages.forEach((page) => merged.addPage(page));
     onProgress(18 + ((index + 1) / items.length) * 64);
   }
   const bytes = await merged.save({
     addDefaultPage: false,
-    useObjectStreams: true,
+    useObjectStreams: false,
   });
   onProgress(94);
   return new Blob([bytesToArrayBuffer(bytes)], { type: 'application/pdf' });
@@ -708,6 +730,7 @@ function SortableFileRow({
 function DropZone({
   mode,
   hasFiles,
+  isNewTask,
   isDragging,
   onDragChange,
   onDrop,
@@ -715,6 +738,7 @@ function DropZone({
 }: {
   mode: Mode;
   hasFiles: boolean;
+  isNewTask: boolean;
   isDragging: boolean;
   onDragChange: (value: boolean) => void;
   onDrop: (files: FileList | File[]) => void;
@@ -734,7 +758,7 @@ function DropZone({
 
   return (
     <motion.div
-      className={`drop-zone ${isDragging ? 'is-dragging' : ''} ${hasFiles ? 'has-files' : ''}`}
+      className={`drop-zone ${isDragging ? 'is-dragging' : ''} ${hasFiles ? 'has-files' : 'is-empty'}`}
       animate={{ scale: isDragging ? 1.012 : 1 }}
       transition={{ duration: 0.2, ease }}
       onDragEnter={handleDragOver}
@@ -759,6 +783,8 @@ function DropZone({
       <span className="drop-title">
         {isDragging
           ? mode === 'convert' ? '松开鼠标，添加文件' : '松开鼠标，添加 PDF'
+          : isNewTask
+            ? mode === 'convert' ? '拖入文件开始新的任务' : '拖入 PDF 开始新的任务'
           : hasFiles
             ? mode === 'convert' ? '再添加一个文件' : '再添加一个 PDF'
             : mode === 'convert' ? '把文件拖到这里' : '把 PDF 拖到这里'}
@@ -771,6 +797,11 @@ function DropZone({
 }
 
 function ProgressPanel({ label, progress }: { label: string; progress: number }) {
+  const normalizedProgress = clamp(progress, 0, 100);
+  const filledSegments = normalizedProgress > 0
+    ? Math.ceil(normalizedProgress / (100 / PROGRESS_SEGMENT_COUNT))
+    : 0;
+
   return (
     <motion.div
       className="progress-panel"
@@ -779,14 +810,59 @@ function ProgressPanel({ label, progress }: { label: string; progress: number })
       transition={{ duration: 0.3, ease }}
     >
       <div className="progress-heading">
-        <span>{label}</span>
-        <span>{formatPercent(progress)}</span>
+        <div className="progress-percent-row">
+          <span className="progress-percent">{formatPercent(normalizedProgress)}</span>
+          <span className="progress-label">{label}</span>
+        </div>
       </div>
-      <div className="progress-track" aria-label={`已完成 ${formatPercent(progress)}`}>
-        <motion.div className="progress-value" animate={{ width: `${progress}%` }} transition={{ duration: 0.35, ease }} />
+      <div
+        className="progress-track"
+        role="progressbar"
+        aria-label={`已完成 ${formatPercent(normalizedProgress)}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(normalizedProgress)}
+      >
+        {Array.from({ length: PROGRESS_SEGMENT_COUNT }, (_, index) => (
+          <motion.span
+            key={index}
+            className={`progress-segment ${index < filledSegments ? 'is-filled' : ''} ${index === filledSegments - 1 && normalizedProgress < 100 ? 'is-current' : ''}`}
+            initial={false}
+            animate={{ opacity: index < filledSegments ? 1 : 0.72 }}
+            transition={{ duration: 0.24, ease }}
+            aria-hidden="true"
+          />
+        ))}
       </div>
       <span className="progress-note">文件始终保留在当前设备 </span>
     </motion.div>
+  );
+}
+
+type ToolStepStatus = 'complete' | 'current' | 'upcoming';
+
+function ToolStep({
+  number,
+  title,
+  description,
+  status,
+}: {
+  number: string;
+  title: string;
+  description: string;
+  status: ToolStepStatus;
+}) {
+  return (
+    <div className={`tool-step is-${status}`} aria-current={status === 'current' ? 'step' : undefined}>
+      <span className="tool-step-marker" aria-hidden="true">
+        {status === 'complete' ? <Check size={17} strokeWidth={2.5} /> : status === 'current' ? <span className="tool-step-current-dot" /> : <Clock3 size={17} strokeWidth={1.9} />}
+      </span>
+      <div className="tool-step-copy">
+        <span className="tool-step-number">{number}</span>
+        <strong>{title}</strong>
+        <p>{description}</p>
+      </div>
+    </div>
   );
 }
 
@@ -1017,7 +1093,10 @@ function App() {
         setTargetUnit(defaultTarget.unit);
         if (validFiles.length > 1) showToast('压缩模式一次处理一个 PDF，已使用第一个文件 ', 'info');
       } else {
-        const existingNames = new Set(mergeItems.map((item) => `${item.name}-${item.size}`));
+        const isStartingNewMerge = Boolean(mergeResult);
+        const existingNames = new Set(
+          (isStartingNewMerge ? [] : mergeItems).map((item) => `${item.name}-${item.size}`),
+        );
         const nextItems: PdfItem[] = [];
         for (const file of validFiles) {
           if (existingNames.has(`${file.name}-${file.size}`)) {
@@ -1027,7 +1106,7 @@ function App() {
           nextItems.push(await inspectPdf(file));
         }
         if (nextItems.length) {
-          setMergeItems((current) => [...current, ...nextItems]);
+          setMergeItems((current) => isStartingNewMerge ? nextItems : [...current, ...nextItems]);
           setMergeResult(null);
         }
       }
@@ -1146,50 +1225,67 @@ function App() {
 
   return (
     <div className="app-shell">
-      <div className="ambient ambient-one" aria-hidden="true" />
-      <div className="ambient ambient-two" aria-hidden="true" />
       <header className="topbar">
-        <a className="brand" href="/" onClick={(event) => event.preventDefault()} aria-label="纸落首页">
-          <span className="brand-mark"><span /><span /><span /></span>
-          <span>纸落</span>
-        </a>
-        <div className="topbar-meta">
-          <span className="privacy-pip" />
-          <span>本地处理</span>
-          <span className="meta-divider" />
-          <span>文档工具 / 03</span>
+        <div className="topbar-inner">
+          <a className="brand" href="/" onClick={(event) => event.preventDefault()} aria-label="ZhiLuo 首页">
+            <span className="brand-mark" aria-hidden="true"><span /><span /><span /></span>
+            <span>ZhiLuo</span>
+          </a>
         </div>
       </header>
 
       <main className="main-content">
-        <section className="intro-block">
-          <p className="eyebrow intro-eyebrow"><span>01</span> 更顺手的文件工作流</p>
-          <h1>拖入 设定 <em>完成</em></h1>
-          <p className="intro-copy">合并、压缩 PDF，或把 Word / PDF / 图片转换成需要的格式 <br className="desktop-break" /> 无需账号，没有多余功能，文件不会离开你的设备 </p>
+        <section className="intro-block" id="about">
+          <h1>处理 PDF，<em>从这里开始</em></h1>
+          <p className="intro-copy">合并、压缩或转换文件。无需账号，文件始终留在你的设备。</p>
+          <div className={`mode-switch intro-mode-switch mode-${mode}`} role="tablist" aria-label="文件操作">
+            <button className={mode === 'merge' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'merge'} onClick={() => switchMode('merge')}>
+              <Combine size={20} strokeWidth={1.8} aria-hidden="true" />
+              <span>合并 PDF</span>
+            </button>
+            <button className={mode === 'compress' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'compress'} onClick={() => switchMode('compress')}>
+              <Minimize2 size={20} strokeWidth={1.8} aria-hidden="true" />
+              <span>压缩 PDF</span>
+            </button>
+            <button className={mode === 'convert' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'convert'} onClick={() => switchMode('convert')}>
+              <FileOutput size={20} strokeWidth={1.8} aria-hidden="true" />
+              <span>格式转换</span>
+            </button>
+          </div>
         </section>
 
-        <section className="workspace-card" aria-label="文件工作区">
-          <div className="workspace-topline">
-            <div className="mode-label">
-              <span className="tiny-file-icon"><FileText size={14} strokeWidth={1.8} /></span>
-              <span>{mode === 'merge' ? '排列并合并' : mode === 'compress' ? '减小文件体积' : 'Word / PDF / 图片转换'}</span>
-            </div>
-            <div className="mode-switch" role="tablist" aria-label="文件操作">
-              <button className={mode === 'merge' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'merge'} onClick={() => switchMode('merge')}>合并 PDF</button>
-              <button className={mode === 'compress' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'compress'} onClick={() => switchMode('compress')}>压缩 PDF</button>
-              <button className={mode === 'convert' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'convert'} onClick={() => switchMode('convert')}>格式转换</button>
-            </div>
-          </div>
-
+        <section className="workspace-card" id="workspace" aria-label="文件工作区">
           <div className="workspace-body">
-            <div className="task-rail" aria-hidden="true">
-              <span className="rail-kicker">流程</span>
-              <span className="rail-step is-current">01 <i>输入</i></span>
-              <span className="rail-line" />
-              <span className={`rail-step ${activeItemCount ? 'is-current' : ''}`}>02 <i>设定</i></span>
-              <span className="rail-line" />
-              <span className={`rail-step ${activeResult ? 'is-current' : ''}`}>03 <i>输出</i></span>
-            </div>
+            <aside className="tool-description" aria-label="工具说明">
+              <div className="tool-description-kicker">
+                <span className="tool-index">01</span>
+                <span>当前工具</span>
+              </div>
+              <div>
+                <h2>{mode === 'merge' ? '合并 PDF' : mode === 'compress' ? '压缩 PDF' : '格式转换'}</h2>
+                <p>{mode === 'merge' ? '把多个文件按顺序合成一个 PDF。页面内容保持原样。' : mode === 'compress' ? '设定目标大小，减少文件体积，方便发送与存档。' : '在 Word、PDF 和图片之间转换，适合打印与分享。'}</p>
+              </div>
+              <div className="tool-steps" aria-label="处理流程">
+                <ToolStep
+                  number="01"
+                  title="输入文件"
+                  description="添加要处理的文件"
+                  status={activeItemCount ? 'complete' : 'current'}
+                />
+                <ToolStep
+                  number="02"
+                  title="设置参数"
+                  description={mode === 'merge' ? '确认文件顺序' : mode === 'compress' ? '调整目标大小' : '选择输出格式'}
+                  status={activeResult ? 'complete' : activeItemCount ? 'current' : 'upcoming'}
+                />
+                <ToolStep
+                  number="03"
+                  title="下载结果"
+                  description="处理完成后保存文件"
+                  status={activeResult ? 'current' : 'upcoming'}
+                />
+              </div>
+            </aside>
 
             <div className="task-content">
               <AnimatePresence mode="wait" initial={false}>
@@ -1203,16 +1299,16 @@ function App() {
                 >
                   <div className="task-heading">
                     <div>
-                      <p className="eyebrow">{mode === 'merge' ? '01 / 按顺序合并' : mode === 'compress' ? '01 / 设定目标大小' : '01 / 选择输出格式'}</p>
-                      <h2>{mode === 'merge' ? '把多个 PDF 合成一个 ' : mode === 'compress' ? '让 PDF 更轻一些 ' : '把文件变成需要的格式 '}</h2>
+                      <h2>{mode === 'merge' ? '添加 PDF 文件' : mode === 'compress' ? '添加一个 PDF' : '添加要转换的文件'}</h2>
                     </div>
-                    <span className="task-description">{mode === 'merge' ? '拖动调整顺序，页面内容保持原样 ' : mode === 'compress' ? '设定你想要的大小，必要时降低页面图片质量 ' : 'Word 转 PDF / 图片，PDF 转图片，图片也可生成 PDF '}</span>
+                    <span className="task-description">{mode === 'merge' ? '支持多个文件，可拖动调整顺序。' : mode === 'compress' ? '目标大小越小，页面图片质量可能越低。' : '支持 Word、PDF、PNG、JPG 和 WebP。'}</span>
                   </div>
 
-                  {(mode === 'merge' || !activeItemCount) && (
+                  {!isProcessing && (mode === 'merge' || !activeItemCount || Boolean(activeResult)) && (
                     <DropZone
                       mode={mode}
-                      hasFiles={mode === 'merge' && mergeItems.length > 0}
+                      hasFiles={activeItemCount > 0}
+                      isNewTask={Boolean(activeResult)}
                       isDragging={isDragging}
                       onDragChange={setIsDragging}
                       onDrop={addFiles}
@@ -1349,7 +1445,6 @@ function App() {
 
         <div className="page-footnote">
           <span><HardDrive size={14} strokeWidth={1.7} /> 为小任务而做 </span>
-          <span className="footnote-right"><Sparkles size={13} strokeWidth={1.7} /> 无需账号</span>
         </div>
       </main>
 

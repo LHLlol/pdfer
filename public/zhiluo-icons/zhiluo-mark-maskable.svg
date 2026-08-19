@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">ZhiLuo maskable mark</title>
+  <desc id="desc">A safe-area version of the ZhiLuo geometric badge.</desc>
+  <rect width="512" height="512" fill="#F7F1D3"/>
+  <path fill="#F01824" d="M116 177 165 137 246 130 337 139 391 196 416 288 378 377 280 421 174 405 112 318 117 235Z"/>
+  <path fill="#1F78B7" d="m137 170 28-66 65 34 41-1 68-32 34 33-49 38-46-16-43 20-47 63-29-29 37-46-59-33Z"/>
+  <path fill="#2E388E" d="m177 193 67-51 54 3 76 38-11 32-59-22-20 85-33 11-32-55-38 34-22-29Z"/>
+  <path fill="#F98D1B" d="M149 235q0-9 11-9h83q11 0 4 9l-53 54h53v37h-97q-11 0-4-9l57-54h-45q-9 0-9-9Z"/>
+  <path fill="#F98D1B" d="M269 228h38v67h48v35h-86Z"/>
+  <path fill="#F98D1B" d="m347 221 35-11 10 31-35 11Z"/>
+</svg>
