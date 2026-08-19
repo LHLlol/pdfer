@@ -1,6 +1,6 @@
 # ZhiLuo 网页图标包
 
-这套图标参考用户提供的设计，保留米白、红、橙、蓝四种主色和几何徽章构成，并针对 favicon 的小尺寸识别做了简化。
+这套图标使用 ZhiLuo 黑色圆润几何字标，并针对 favicon、桌面安装图标和页面品牌标记分别做了尺寸适配。
 
 ## 文件说明
 
@@ -10,9 +10,11 @@
 - `icon-192.png` / `icon-512.png`：PWA 图标
 - `icon-512-maskable.png`：支持系统自适应裁切的 PWA 图标
 - `favicon.ico`：兼容旧浏览器的多尺寸图标
-- `zhiluo-mark.svg`：可编辑的正方形源图形
-- `zhiluo-wordmark.svg`：带 ZhiLuo 字标的横向组合
+- `zhiluo-mark.svg`：正方形 Z 字标
+- `zhiluo-wordmark.svg`：ZhiLuo 横向字标
+- `zhiluo-mark-ai-v1.png`：新字标提取的方形 Z 图标
+- `zhiluo-wordmark-ai-v1-cropped.png`：新生成的横向 ZhiLuo 字标
 
 ## 使用
 
-`index.html` 已接入 favicon、Apple Touch Icon 和 `site.webmanifest`。如果只需要复用品牌图形，可直接引用 `zhiluo-mark.svg`。
+`index.html` 已接入 favicon、Apple Touch Icon 和 `site.webmanifest`。页面顶部品牌标记使用 `zhiluo-mark-ai-v1.png`，需要横向品牌字标时可引用 `zhiluo-wordmark-ai-v1-cropped.png`。

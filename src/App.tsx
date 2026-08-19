@@ -1228,7 +1228,7 @@ function App() {
       <header className="topbar">
         <div className="topbar-inner">
           <a className="brand" href="/" onClick={(event) => event.preventDefault()} aria-label="ZhiLuo 首页">
-            <span className="brand-mark" aria-hidden="true"><span /><span /><span /></span>
+            <img className="brand-mark" src="/zhiluo-icons/zhiluo-mark-ai-v1.png" alt="" aria-hidden="true" />
             <span>ZhiLuo</span>
           </a>
         </div>

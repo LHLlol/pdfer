@@ -5,8 +5,8 @@
   "lang": "zh-CN",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#F7F1D3",
-  "theme_color": "#F7F1D3",
+  "background_color": "#FBF7F6",
+  "theme_color": "#FBF7F6",
   "icons": [
     {
       "src": "/zhiluo-icons/icon-192.png",
