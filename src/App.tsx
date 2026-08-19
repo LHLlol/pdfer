@@ -126,6 +126,10 @@ function formatPercent(value: number) {
   return `${Math.max(0, Math.round(value))}%`;
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function isPdf(file: File) {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 }
@@ -240,6 +244,7 @@ async function createMergedPdf(items: PdfItem[], onProgress: (value: number) => 
 
 async function createCompressedPdf(
   item: PdfItem,
+  targetBytes: number,
   onProgress: (value: number) => void,
 ) {
   const sourceBytes = await item.file.arrayBuffer();
@@ -252,9 +257,89 @@ async function createCompressedPdf(
     useObjectStreams: true,
     updateFieldAppearances: false,
   });
-  onProgress(92);
-  const candidate = new Blob([bytesToArrayBuffer(bytes)], { type: 'application/pdf' });
-  return candidate.size < item.size ? candidate : new Blob([sourceBytes], { type: 'application/pdf' });
+  onProgress(54);
+  const structuralCandidate = new Blob([bytesToArrayBuffer(bytes)], { type: 'application/pdf' });
+  let bestCandidate = structuralCandidate.size < item.size
+    ? structuralCandidate
+    : new Blob([sourceBytes], { type: 'application/pdf' });
+
+  // pdf-lib can optimize the PDF container, but it cannot recompress images that
+  // are already embedded in a PDF. Rasterizing pages gives image-heavy PDFs a
+  // real compression path when structural optimization is not enough.
+  if (bestCandidate.size <= targetBytes) {
+    onProgress(94);
+    return bestCandidate;
+  }
+
+  const targetRatio = clamp(targetBytes / item.size, 0.08, 0.95);
+  const compressionStrength = 1 - targetRatio;
+  const baseScale = clamp(1.22 - compressionStrength * 0.68, 0.58, 1.22);
+  const baseQuality = clamp(0.82 - compressionStrength * 0.42, 0.38, 0.82);
+  const attempts = [
+    { scale: baseScale, quality: baseQuality },
+    { scale: clamp(baseScale - 0.18, 0.48, 1.05), quality: clamp(baseQuality - 0.14, 0.28, 0.78) },
+    { scale: clamp(baseScale - 0.34, 0.42, 0.88), quality: clamp(baseQuality - 0.26, 0.22, 0.65) },
+  ];
+
+  const loadingTask = getDocument({ data: new Uint8Array(sourceBytes) });
+  const sourcePdf = await loadingTask.promise;
+  try {
+    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex += 1) {
+      const { scale, quality } = attempts[attemptIndex];
+      const rasterized = await rasterizePdf(
+        sourcePdf,
+        scale,
+        quality,
+        (pageProgress) => onProgress(54 + ((attemptIndex + pageProgress / 100) / attempts.length) * 42),
+      );
+      if (rasterized.size < bestCandidate.size) bestCandidate = rasterized;
+      if (rasterized.size <= targetBytes) break;
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  onProgress(96);
+  return bestCandidate;
+}
+
+async function rasterizePdf(
+  sourcePdf: Awaited<ReturnType<typeof getDocument>['promise']>,
+  scale: number,
+  quality: number,
+  onProgress: (value: number) => void,
+) {
+  const compressed = await PDFDocument.create();
+  for (let pageNumber = 1; pageNumber <= sourcePdf.numPages; pageNumber += 1) {
+    const page = await sourcePdf.getPage(pageNumber);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const maxDimension = Math.max(baseViewport.width, baseViewport.height);
+    const renderScale = Math.min(scale, 2000 / maxDimension);
+    const viewport = page.getViewport({ scale: renderScale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.ceil(viewport.width));
+    canvas.height = Math.max(1, Math.ceil(viewport.height));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('无法创建图片画布');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    const jpeg = await canvasToBlob(canvas, 'image/jpeg', quality);
+    const image = await compressed.embedJpg(new Uint8Array(await jpeg.arrayBuffer()));
+    const outputPage = compressed.addPage([baseViewport.width, baseViewport.height]);
+    outputPage.drawImage(image, {
+      x: 0,
+      y: 0,
+      width: baseViewport.width,
+      height: baseViewport.height,
+    });
+    page.cleanup();
+    onProgress((pageNumber / sourcePdf.numPages) * 100);
+  }
+  const bytes = await compressed.save({
+    addDefaultPage: false,
+    useObjectStreams: true,
+  });
+  return new Blob([bytesToArrayBuffer(bytes)], { type: 'application/pdf' });
 }
 
 type RenderedPage = {
@@ -655,7 +740,8 @@ function DropZone({
       onDragEnter={handleDragOver}
       onDragOver={handleDragOver}
       onDragLeave={(event) => {
-        if (event.currentTarget === event.target) onDragChange(false);
+        const nextTarget = event.relatedTarget as Node | null;
+        if (!nextTarget || !event.currentTarget.contains(nextTarget)) onDragChange(false);
       }}
       onDrop={handleDrop}
       onClick={onBrowse}
@@ -1007,7 +1093,7 @@ function App() {
         });
       } else if (compressItem && targetBytes) {
         setProgressLabel('优化 PDF 结构');
-        const blob = await createCompressedPdf(compressItem, setProgress);
+        const blob = await createCompressedPdf(compressItem, targetBytes, setProgress);
         setProgressLabel('正在完成');
         setProgress(100);
         setCompressResult({
@@ -1120,13 +1206,13 @@ function App() {
                       <p className="eyebrow">{mode === 'merge' ? '01 / 按顺序合并' : mode === 'compress' ? '01 / 设定目标大小' : '01 / 选择输出格式'}</p>
                       <h2>{mode === 'merge' ? '把多个 PDF 合成一个 ' : mode === 'compress' ? '让 PDF 更轻一些 ' : '把文件变成需要的格式 '}</h2>
                     </div>
-                    <span className="task-description">{mode === 'merge' ? '拖动调整顺序，页面内容保持原样 ' : mode === 'compress' ? '设定你想要的大小，文字和矢量内容仍可搜索 ' : 'Word 转 PDF / 图片，PDF 转图片，图片也可生成 PDF '}</span>
+                    <span className="task-description">{mode === 'merge' ? '拖动调整顺序，页面内容保持原样 ' : mode === 'compress' ? '设定你想要的大小，必要时降低页面图片质量 ' : 'Word 转 PDF / 图片，PDF 转图片，图片也可生成 PDF '}</span>
                   </div>
 
-                  {!activeItemCount && (
+                  {(mode === 'merge' || !activeItemCount) && (
                     <DropZone
                       mode={mode}
-                      hasFiles={false}
+                      hasFiles={mode === 'merge' && mergeItems.length > 0}
                       isDragging={isDragging}
                       onDragChange={setIsDragging}
                       onDrop={addFiles}
@@ -1178,7 +1264,7 @@ function App() {
                             <span className="section-label">目标大小</span>
                             <span className="section-note">原始大小：{formatBytes(compressItem.size)}</span>
                           </div>
-                          <span className="target-hint">文字仍可搜索</span>
+                          <span className="target-hint">优先保留清晰度</span>
                         </div>
                         <div className={`target-input-wrap ${targetError ? 'has-error' : ''}`}>
                           <input
