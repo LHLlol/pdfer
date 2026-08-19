@@ -7,9 +7,12 @@ import {
   ChevronDown,
   CircleAlert,
   Download,
+  FileImage,
+  FileType2,
   FileText,
   GripVertical,
   HardDrive,
+  Image as ImageIcon,
   Plus,
   RotateCcw,
   ShieldCheck,
@@ -35,10 +38,20 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { PDFDocument } from 'pdf-lib';
+import html2canvas from 'html2canvas';
+import JSZip from 'jszip';
+import mammoth from 'mammoth';
+import { jsPDF } from 'jspdf';
+import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { useMemo, useRef, useState } from 'react';
 
-type Mode = 'merge' | 'compress';
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+type Mode = 'merge' | 'compress' | 'convert';
 type ToastKind = 'error' | 'success' | 'info';
+type ConvertFormat = 'pdf' | 'image';
+type ConversionKind = 'word' | 'pdf' | 'image';
 
 type PdfItem = {
   id: string;
@@ -48,15 +61,41 @@ type PdfItem = {
   pages: number;
 };
 
-type OutputFile = {
+type PdfOutput = {
   blob: Blob;
   name: string;
   size: number;
   originalSize: number;
-  kind: Mode;
+  kind: 'merge' | 'compress';
   reachedTarget?: boolean;
   targetSize?: number;
 };
+
+type DownloadableFile = {
+  blob: Blob;
+  name: string;
+  size: number;
+};
+
+type ConversionItem = {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  kind: ConversionKind;
+};
+
+type ConversionOutput = {
+  kind: 'convert';
+  files: DownloadableFile[];
+  download: DownloadableFile;
+  outputFormat: ConvertFormat;
+  originalSize: number;
+  size: number;
+  sourceName: string;
+};
+
+type OutputFile = PdfOutput | ConversionOutput;
 
 type Toast = {
   id: number;
@@ -64,9 +103,12 @@ type Toast = {
   message: string;
 };
 
-const MAX_FILE_SIZE = 100 * 1024 * 1024;
+const MAX_FILE_SIZE = 500 * 1024 * 1024;
 const MEGABYTE = 1024 * 1024;
 const KILOBYTE = 1024;
+const PAGE_WIDTH = 794;
+const PAGE_HEIGHT = 1123;
+const PAGE_PADDING = 76;
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -88,8 +130,45 @@ function isPdf(file: File) {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 }
 
+function isWord(file: File) {
+  const name = file.name.toLowerCase();
+  return file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    || name.endsWith('.docx');
+}
+
+function isLegacyWord(file: File) {
+  return file.name.toLowerCase().endsWith('.doc');
+}
+
+function isImage(file: File) {
+  return file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(file.name);
+}
+
+function getConversionKind(file: File): ConversionKind | null {
+  if (isPdf(file)) return 'pdf';
+  if (isWord(file)) return 'word';
+  if (isImage(file)) return 'image';
+  return null;
+}
+
+function getConversionLabel(kind: ConversionKind) {
+  if (kind === 'word') return 'Word 文档';
+  if (kind === 'pdf') return 'PDF 文件';
+  return '图片文件';
+}
+
+function getBaseName(name: string) {
+  return name.replace(/\.[^.]+$/, '');
+}
+
 function getFriendlyError(error: unknown) {
   const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (message.includes('docx') || message.includes('word')) {
+    return '这个 Word 文件无法读取，请确认它是有效的 .docx 文件 ';
+  }
+  if (message.includes('image') || message.includes('decode')) {
+    return '这个图片无法读取，请尝试 PNG、JPG 或 WebP 文件 ';
+  }
   if (message.includes('encrypted') || message.includes('password')) {
     return '暂不支持有密码保护的 PDF ';
   }
@@ -176,6 +255,306 @@ async function createCompressedPdf(
   onProgress(92);
   const candidate = new Blob([bytesToArrayBuffer(bytes)], { type: 'application/pdf' });
   return candidate.size < item.size ? candidate : new Blob([sourceBytes], { type: 'application/pdf' });
+}
+
+type RenderedPage = {
+  dataUrl: string;
+  file: DownloadableFile;
+};
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality = 0.92) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('无法生成图片'));
+    }, type, quality);
+  });
+}
+
+async function waitForImages(root: HTMLElement) {
+  const images = Array.from(root.querySelectorAll('img'));
+  await Promise.all(images.map(async (image) => {
+    if (image.complete) {
+      try {
+        await image.decode();
+      } catch {
+        // Some browsers do not expose decode() for data URI images.
+      }
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      image.addEventListener('load', () => resolve(), { once: true });
+      image.addEventListener('error', () => resolve(), { once: true });
+    });
+  }));
+}
+
+function createWordConversionSandbox() {
+  const sandbox = document.createElement('div');
+  sandbox.className = 'word-conversion-sandbox';
+  sandbox.innerHTML = `
+    <style>
+      .word-conversion-page {
+        box-sizing: border-box;
+        width: ${PAGE_WIDTH}px;
+        height: ${PAGE_HEIGHT}px;
+        padding: ${PAGE_PADDING}px;
+        overflow: hidden;
+        background: #fff;
+        color: #182532;
+        font-family: Arial, "Microsoft YaHei", sans-serif;
+        font-size: 16px;
+        line-height: 1.55;
+      }
+      .word-conversion-page-content {
+        box-sizing: border-box;
+        height: ${PAGE_HEIGHT - PAGE_PADDING * 2}px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .word-conversion-page-content > * {
+        flex: 0 0 auto;
+        max-width: 100%;
+        margin: 0 0 13px;
+      }
+      .word-conversion-page-content h1,
+      .word-conversion-page-content h2,
+      .word-conversion-page-content h3 {
+        color: #182532;
+        line-height: 1.25;
+      }
+      .word-conversion-page-content h1 { font-size: 29px; }
+      .word-conversion-page-content h2 { font-size: 23px; }
+      .word-conversion-page-content h3 { font-size: 19px; }
+      .word-conversion-page-content img { max-width: 100%; height: auto; }
+      .word-conversion-page-content table { width: 100%; border-collapse: collapse; }
+      .word-conversion-page-content td,
+      .word-conversion-page-content th { border: 1px solid #cdd6df; padding: 7px 9px; text-align: left; }
+      .word-conversion-page-content ul,
+      .word-conversion-page-content ol { padding-left: 28px; }
+      .word-conversion-page-content blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid #2f6bff; color: #5e6b78; }
+    </style>
+  `;
+  Object.assign(sandbox.style, {
+    position: 'fixed',
+    left: '-100000px',
+    top: '0',
+    width: `${PAGE_WIDTH}px`,
+    zIndex: '-1',
+    pointerEvents: 'none',
+  });
+  return sandbox;
+}
+
+async function renderWordPages(file: File, onProgress: (value: number) => void) {
+  if (isLegacyWord(file)) {
+    throw new Error('legacy word format');
+  }
+  const result = await mammoth.convertToHtml(
+    { arrayBuffer: await file.arrayBuffer() },
+    { convertImage: mammoth.images.dataUri },
+  );
+  const sandbox = createWordConversionSandbox();
+  const source = document.createElement('div');
+  source.className = 'word-conversion-source';
+  source.innerHTML = result.value.trim() || '<p>（文档没有可显示内容）</p>';
+  sandbox.appendChild(source);
+  document.body.appendChild(sandbox);
+
+  const pages: HTMLElement[] = [];
+
+  const createPage = () => {
+    const page = document.createElement('section');
+    page.className = 'word-conversion-page';
+    const pageContent = document.createElement('div');
+    pageContent.className = 'word-conversion-page-content';
+    page.appendChild(pageContent);
+    sandbox.appendChild(page);
+    pages.push(page);
+    return pageContent;
+  };
+
+  let currentContent = createPage();
+  const blocks = Array.from(source.children);
+  for (const block of blocks) {
+    currentContent.appendChild(block);
+    if (currentContent.scrollHeight > currentContent.clientHeight && currentContent.children.length > 1) {
+      currentContent.removeChild(block);
+      currentContent = createPage();
+      currentContent.appendChild(block);
+    }
+  }
+  source.remove();
+  await Promise.all(pages.map((page) => waitForImages(page)));
+
+  const renderedPages: RenderedPage[] = [];
+  for (let index = 0; index < pages.length; index += 1) {
+    const canvas = await html2canvas(pages[index], {
+      backgroundColor: '#ffffff',
+      logging: false,
+      scale: 1.5,
+      width: PAGE_WIDTH,
+      height: PAGE_HEIGHT,
+      windowWidth: PAGE_WIDTH,
+    });
+    const blob = await canvasToBlob(canvas, 'image/png');
+    renderedPages.push({
+      dataUrl: canvas.toDataURL('image/png'),
+      file: {
+        blob,
+        name: `${getBaseName(file.name)}-${String(index + 1).padStart(3, '0')}.png`,
+        size: blob.size,
+      },
+    });
+    onProgress(20 + ((index + 1) / pages.length) * 68);
+  }
+  sandbox.remove();
+  return renderedPages;
+}
+
+async function renderPdfPagesToImages(file: File, onProgress: (value: number) => void) {
+  const loadingTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+  const pdf = await loadingTask.promise;
+  const files: DownloadableFile[] = [];
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const scale = Math.min(1.7, Math.max(1, 1800 / baseViewport.width));
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('无法创建图片画布');
+      await page.render({ canvas: canvas, canvasContext: context, viewport }).promise;
+      const blob = await canvasToBlob(canvas, 'image/png');
+      files.push({
+        blob,
+        name: `${getBaseName(file.name)}-${String(pageNumber).padStart(3, '0')}.png`,
+        size: blob.size,
+      });
+      page.cleanup();
+      onProgress(18 + (pageNumber / pdf.numPages) * 70);
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  return files;
+}
+
+async function loadImage(file: File) {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    return image;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function imageToPng(file: File) {
+  const image = await loadImage(file);
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('无法创建图片画布');
+  context.drawImage(image, 0, 0);
+  const blob = await canvasToBlob(canvas, 'image/png');
+  return {
+    dataUrl: canvas.toDataURL('image/png'),
+    file: { blob, name: `${getBaseName(file.name)}.png`, size: blob.size },
+    width: image.naturalWidth,
+    height: image.naturalHeight,
+  };
+}
+
+async function imageToPdf(file: File) {
+  const image = await imageToPng(file);
+  const pdf = new jsPDF({
+    unit: 'mm',
+    format: 'a4',
+    orientation: image.width > image.height ? 'landscape' : 'portrait',
+  });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const margin = 8;
+  const scale = Math.min((pageWidth - margin * 2) / image.width, (pageHeight - margin * 2) / image.height);
+  const width = image.width * scale;
+  const height = image.height * scale;
+  pdf.addImage(image.dataUrl, 'PNG', (pageWidth - width) / 2, (pageHeight - height) / 2, width, height, undefined, 'FAST');
+  const bytes = pdf.output('arraybuffer');
+  return new Blob([bytes], { type: 'application/pdf' });
+}
+
+function renderedPagesToPdf(pages: RenderedPage[]) {
+  const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+  pages.forEach((page, index) => {
+    if (index > 0) pdf.addPage('a4', 'portrait');
+    pdf.addImage(page.dataUrl, 'PNG', 0, 0, 210, 297, undefined, 'FAST');
+  });
+  return new Blob([pdf.output('arraybuffer')], { type: 'application/pdf' });
+}
+
+async function zipFiles(files: DownloadableFile[], name: string) {
+  const zip = new JSZip();
+  files.forEach((file) => zip.file(file.name, file.blob));
+  const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+  return { blob, name, size: blob.size };
+}
+
+async function createConversionOutput(
+  item: ConversionItem,
+  format: ConvertFormat,
+  onProgress: (value: number) => void,
+): Promise<ConversionOutput> {
+  const baseName = getBaseName(item.name);
+  let files: DownloadableFile[];
+
+  if (item.kind === 'word') {
+    const pages = await renderWordPages(item.file, onProgress);
+    if (format === 'pdf') {
+      const blob = renderedPagesToPdf(pages);
+      files = [{ blob, name: `${baseName}.pdf`, size: blob.size }];
+    } else {
+      files = pages.map((page) => page.file);
+    }
+  } else if (item.kind === 'pdf') {
+    if (format === 'pdf') {
+      const blob = new Blob([await item.file.arrayBuffer()], { type: 'application/pdf' });
+      files = [{ blob, name: `${baseName}-converted.pdf`, size: blob.size }];
+      onProgress(88);
+    } else {
+      files = await renderPdfPagesToImages(item.file, onProgress);
+    }
+  } else if (format === 'pdf') {
+    const blob = await imageToPdf(item.file);
+    files = [{ blob, name: `${baseName}.pdf`, size: blob.size }];
+    onProgress(88);
+  } else {
+    const image = await imageToPng(item.file);
+    files = [image.file];
+    onProgress(88);
+  }
+
+  const download = files.length > 1
+    ? await zipFiles(files, `${baseName}-images.zip`)
+    : files[0];
+  onProgress(100);
+  return {
+    kind: 'convert',
+    files,
+    download,
+    outputFormat: format,
+    originalSize: item.size,
+    size: download.size,
+    sourceName: item.name,
+  };
 }
 
 function SortableFileRow({
@@ -285,14 +664,22 @@ function DropZone({
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') onBrowse();
       }}
-      aria-label={mode === 'merge' ? '选择要合并的 PDF 文件' : '选择要压缩的 PDF'}
+      aria-label={mode === 'merge' ? '选择要合并的 PDF 文件' : mode === 'compress' ? '选择要压缩的 PDF' : '选择 Word、PDF 或图片文件'}
     >
       <span className="drop-orbit" aria-hidden="true" />
       <span className="upload-mark" aria-hidden="true">
         <UploadCloud size={24} strokeWidth={1.55} />
       </span>
-      <span className="drop-title">{isDragging ? '松开鼠标，添加 PDF' : hasFiles ? '再添加一个 PDF' : '把 PDF 拖到这里'}</span>
-      <span className="drop-subtitle">{mode === 'merge' ? '或点击选择 · 支持多个文件' : '或点击选择 · 一次处理一个文件'}</span>
+      <span className="drop-title">
+        {isDragging
+          ? mode === 'convert' ? '松开鼠标，添加文件' : '松开鼠标，添加 PDF'
+          : hasFiles
+            ? mode === 'convert' ? '再添加一个文件' : '再添加一个 PDF'
+            : mode === 'convert' ? '把文件拖到这里' : '把 PDF 拖到这里'}
+      </span>
+      <span className="drop-subtitle">
+        {mode === 'merge' ? '或点击选择 · 支持多个文件 · 单个不超过 500 MB' : mode === 'compress' ? '或点击选择 · 一次处理一个文件 · 单个不超过 500 MB' : 'Word · PDF · PNG · JPG · WebP · 单个不超过 500 MB'}
+      </span>
     </motion.div>
   );
 }
@@ -317,6 +704,28 @@ function ProgressPanel({ label, progress }: { label: string; progress: number })
   );
 }
 
+function ConversionFileCard({ item, onRemove }: { item: ConversionItem; onRemove: () => void }) {
+  return (
+    <motion.div
+      className="single-file-card conversion-file-card"
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.24, ease }}
+    >
+      <span className={`file-icon file-icon-${item.kind}`}>
+        {item.kind === 'word' ? <FileType2 size={19} strokeWidth={1.7} /> : item.kind === 'pdf' ? <FileText size={19} strokeWidth={1.7} /> : <FileImage size={19} strokeWidth={1.7} />}
+      </span>
+      <span className="file-copy">
+        <span className="file-name" title={item.name}>{item.name}</span>
+        <span className="file-meta">{getConversionLabel(item.kind)} <i /> {formatBytes(item.size)}</span>
+      </span>
+      <button className="icon-button remove-button" type="button" onClick={onRemove} aria-label={`移除 ${item.name}`}>
+        <X size={17} strokeWidth={1.8} />
+      </button>
+    </motion.div>
+  );
+}
+
 function OutputPanel({
   result,
   onDownload,
@@ -326,6 +735,46 @@ function OutputPanel({
   onDownload: () => void;
   onReset: () => void;
 }) {
+  if (result.kind === 'convert') {
+    const isImageOutput = result.outputFormat === 'image';
+    const isArchive = result.files.length > 1;
+    return (
+      <motion.section
+        className="output-panel conversion-output-panel"
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.34, ease }}
+      >
+        <div className="output-status">
+          <span className="success-mark"><Check size={15} strokeWidth={2.3} /></span>
+          <div>
+            <p className="eyebrow">可以下载了</p>
+            <h3>{isImageOutput ? '图片已准备好' : 'PDF 已准备好'}</h3>
+          </div>
+        </div>
+        <div className="output-stats">
+          <div>
+            <span className="stat-label">输出内容</span>
+            <strong>{isImageOutput ? `${result.files.length} 张图片` : '1 个 PDF'}</strong>
+          </div>
+          <div className="output-detail">
+            <span className="conversion-source">来自 {result.sourceName}</span>
+            {isArchive ? '将下载为 ZIP 图片包' : `文件大小 ${formatBytes(result.size)}`}
+          </div>
+        </div>
+        <div className="output-actions">
+          <button className="primary-button" type="button" onClick={onDownload}>
+            {isArchive ? <Download size={17} strokeWidth={1.9} /> : isImageOutput ? <ImageIcon size={17} strokeWidth={1.9} /> : <Download size={17} strokeWidth={1.9} />}
+            {isArchive ? '下载图片包' : isImageOutput ? '下载图片' : '下载 PDF'}
+          </button>
+          <button className="text-button" type="button" onClick={onReset}>
+            <RotateCcw size={15} strokeWidth={1.8} />
+            重新开始
+          </button>
+        </div>
+      </motion.section>
+    );
+  }
   const reduction = result.originalSize > 0 ? (1 - result.size / result.originalSize) * 100 : 0;
   const isSmaller = reduction > 0;
   return (
@@ -385,6 +834,9 @@ function App() {
   const [progressLabel, setProgressLabel] = useState('准备 PDF');
   const [mergeResult, setMergeResult] = useState<OutputFile | null>(null);
   const [compressResult, setCompressResult] = useState<OutputFile | null>(null);
+  const [conversionItem, setConversionItem] = useState<ConversionItem | null>(null);
+  const [conversionFormat, setConversionFormat] = useState<ConvertFormat>('pdf');
+  const [conversionResult, setConversionResult] = useState<ConversionOutput | null>(null);
   const [targetDraft, setTargetDraft] = useState('');
   const [targetUnit, setTargetUnit] = useState<'KB' | 'MB'>('MB');
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -396,7 +848,8 @@ function App() {
   );
 
   const activeItems = mode === 'merge' ? mergeItems : compressItems;
-  const activeResult = mode === 'merge' ? mergeResult : compressResult;
+  const activeItemCount = mode === 'convert' ? (conversionItem ? 1 : 0) : activeItems.length;
+  const activeResult = mode === 'merge' ? mergeResult : mode === 'compress' ? compressResult : conversionResult;
   const compressItem = compressItems[0];
   const targetBytes = compressItem ? parseTargetSize(targetDraft, targetUnit) : null;
   const targetError = compressItem && targetDraft && !targetBytes
@@ -406,7 +859,9 @@ function App() {
       : null;
   const canProcess = mode === 'merge'
     ? mergeItems.length >= 2
-    : Boolean(compressItem && targetBytes && targetBytes < compressItem.size);
+    : mode === 'compress'
+      ? Boolean(compressItem && targetBytes && targetBytes < compressItem.size)
+      : Boolean(conversionItem);
 
   const totalPages = useMemo(
     () => mergeItems.reduce((sum, item) => sum + item.pages, 0),
@@ -425,13 +880,41 @@ function App() {
   const addFiles = async (rawFiles: FileList | File[]) => {
     const files = Array.from(rawFiles);
     if (!files.length) return;
+    if (mode === 'convert') {
+      const file = files[0];
+      if (file.size > MAX_FILE_SIZE) {
+        showToast(`${file.name} 超过 500 MB 大小限制 `, 'error');
+        return;
+      }
+      if (isLegacyWord(file)) {
+        showToast('暂不支持旧版 .doc，请另存为 .docx 后再转换 ', 'error');
+        return;
+      }
+      const kind = getConversionKind(file);
+      if (!kind) {
+        showToast(`${file.name} 不是支持的 Word、PDF 或图片文件 `, 'error');
+        return;
+      }
+      setConversionItem({
+        id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+        file,
+        name: file.name,
+        size: file.size,
+        kind,
+      });
+      setConversionResult(null);
+      setConversionFormat('pdf');
+      if (files.length > 1) showToast('格式转换一次处理一个文件，已使用第一个文件 ', 'info');
+      return;
+    }
+
     const validFiles = files.filter((file) => {
       if (!isPdf(file)) {
         showToast(`${file.name} 不是 PDF 文件 `, 'error');
         return false;
       }
       if (file.size > MAX_FILE_SIZE) {
-        showToast(`${file.name} 超过 100 MB 大小限制 `, 'error');
+        showToast(`${file.name} 超过 500 MB 大小限制 `, 'error');
         return false;
       }
       return true;
@@ -499,11 +982,16 @@ function App() {
     setTargetDraft('');
   };
 
+  const removeConversionItem = () => {
+    setConversionItem(null);
+    setConversionResult(null);
+  };
+
   const processFiles = async () => {
     if (!canProcess || isProcessing) return;
     setIsProcessing(true);
     setProgress(8);
-    setProgressLabel(mode === 'merge' ? '读取 PDF' : '分析 PDF');
+    setProgressLabel(mode === 'merge' ? '读取 PDF' : mode === 'compress' ? '分析 PDF' : '准备转换');
     try {
       if (mode === 'merge') {
         setProgressLabel('合并页面');
@@ -531,6 +1019,12 @@ function App() {
           reachedTarget: blob.size <= targetBytes,
           targetSize: targetBytes,
         });
+      } else if (mode === 'convert' && conversionItem) {
+        setProgressLabel(conversionFormat === 'pdf' ? '准备 PDF' : '渲染图片');
+        const result = await createConversionOutput(conversionItem, conversionFormat, setProgress);
+        setProgressLabel('正在完成');
+        setProgress(100);
+        setConversionResult(result);
       }
     } catch (error) {
       showToast(getFriendlyError(error), 'error');
@@ -541,10 +1035,11 @@ function App() {
 
   const downloadResult = (result: OutputFile | null) => {
     if (!result) return;
-    const url = URL.createObjectURL(result.blob);
+    const downloadable = result.kind === 'convert' ? result.download : result;
+    const url = URL.createObjectURL(downloadable.blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = result.name;
+    anchor.download = downloadable.name;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -555,8 +1050,10 @@ function App() {
     if (mode === 'merge') {
       setMergeItems([]);
       setMergeResult(null);
-    } else {
+    } else if (mode === 'compress') {
       removeCompressItem();
+    } else {
+      removeConversionItem();
     }
     setProgress(0);
   };
@@ -574,26 +1071,27 @@ function App() {
           <span className="privacy-pip" />
           <span>本地处理</span>
           <span className="meta-divider" />
-          <span>PDF 工具 / 02</span>
+          <span>文档工具 / 03</span>
         </div>
       </header>
 
       <main className="main-content">
         <section className="intro-block">
-          <p className="eyebrow intro-eyebrow"><span>01</span> 更轻的 PDF 工作流</p>
+          <p className="eyebrow intro-eyebrow"><span>01</span> 更顺手的文件工作流</p>
           <h1>拖入 设定 <em>完成</em></h1>
-          <p className="intro-copy">在安静、专注的空间里合并或压缩 PDF <br className="desktop-break" /> 无需账号，没有多余功能，文件不会离开你的设备 </p>
+          <p className="intro-copy">合并、压缩 PDF，或把 Word / PDF / 图片转换成需要的格式 <br className="desktop-break" /> 无需账号，没有多余功能，文件不会离开你的设备 </p>
         </section>
 
-        <section className="workspace-card" aria-label="PDF 工作区">
+        <section className="workspace-card" aria-label="文件工作区">
           <div className="workspace-topline">
             <div className="mode-label">
               <span className="tiny-file-icon"><FileText size={14} strokeWidth={1.8} /></span>
-              <span>{mode === 'merge' ? '排列并合并' : '减小文件体积'}</span>
+              <span>{mode === 'merge' ? '排列并合并' : mode === 'compress' ? '减小文件体积' : 'Word / PDF / 图片转换'}</span>
             </div>
-            <div className="mode-switch" role="tablist" aria-label="PDF 操作">
+            <div className="mode-switch" role="tablist" aria-label="文件操作">
               <button className={mode === 'merge' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'merge'} onClick={() => switchMode('merge')}>合并 PDF</button>
               <button className={mode === 'compress' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'compress'} onClick={() => switchMode('compress')}>压缩 PDF</button>
+              <button className={mode === 'convert' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'convert'} onClick={() => switchMode('convert')}>格式转换</button>
             </div>
           </div>
 
@@ -602,7 +1100,7 @@ function App() {
               <span className="rail-kicker">流程</span>
               <span className="rail-step is-current">01 <i>输入</i></span>
               <span className="rail-line" />
-              <span className={`rail-step ${activeItems.length ? 'is-current' : ''}`}>02 <i>设定</i></span>
+              <span className={`rail-step ${activeItemCount ? 'is-current' : ''}`}>02 <i>设定</i></span>
               <span className="rail-line" />
               <span className={`rail-step ${activeResult ? 'is-current' : ''}`}>03 <i>输出</i></span>
             </div>
@@ -619,13 +1117,13 @@ function App() {
                 >
                   <div className="task-heading">
                     <div>
-                      <p className="eyebrow">{mode === 'merge' ? '01 / 按顺序合并' : '01 / 设定目标大小'}</p>
-                      <h2>{mode === 'merge' ? '把多个 PDF 合成一个 ' : '让 PDF 更轻一些 '}</h2>
+                      <p className="eyebrow">{mode === 'merge' ? '01 / 按顺序合并' : mode === 'compress' ? '01 / 设定目标大小' : '01 / 选择输出格式'}</p>
+                      <h2>{mode === 'merge' ? '把多个 PDF 合成一个 ' : mode === 'compress' ? '让 PDF 更轻一些 ' : '把文件变成需要的格式 '}</h2>
                     </div>
-                    <span className="task-description">{mode === 'merge' ? '拖动调整顺序，页面内容保持原样 ' : '设定你想要的大小，文字和矢量内容仍可搜索 '}</span>
+                    <span className="task-description">{mode === 'merge' ? '拖动调整顺序，页面内容保持原样 ' : mode === 'compress' ? '设定你想要的大小，文字和矢量内容仍可搜索 ' : 'Word 转 PDF / 图片，PDF 转图片，图片也可生成 PDF '}</span>
                   </div>
 
-                  {!activeItems.length && (
+                  {!activeItemCount && (
                     <DropZone
                       mode={mode}
                       hasFiles={false}
@@ -713,6 +1211,31 @@ function App() {
                     </div>
                   )}
 
+                  {mode === 'convert' && conversionItem && !conversionResult && (
+                    <div className="convert-setup">
+                      <ConversionFileCard item={conversionItem} onRemove={removeConversionItem} />
+                      <div className="convert-format-block">
+                        <div className="target-heading">
+                          <div>
+                            <span className="section-label">输出格式</span>
+                            <span className="section-note">原始文件：{formatBytes(conversionItem.size)}</span>
+                          </div>
+                          <span className="target-hint">本地转换，不上传文件</span>
+                        </div>
+                        <div className="convert-format-switch" role="radiogroup" aria-label="选择输出格式">
+                          <button className={conversionFormat === 'pdf' ? 'is-active' : ''} type="button" role="radio" aria-checked={conversionFormat === 'pdf'} onClick={() => setConversionFormat('pdf')}>
+                            <FileText size={18} strokeWidth={1.7} />
+                            <span><strong>PDF</strong><small>{conversionItem.kind === 'pdf' ? '保留 PDF 文件' : '适合打印和分享'}</small></span>
+                          </button>
+                          <button className={conversionFormat === 'image' ? 'is-active' : ''} type="button" role="radio" aria-checked={conversionFormat === 'image'} onClick={() => setConversionFormat('image')}>
+                            <ImageIcon size={18} strokeWidth={1.7} />
+                            <span><strong>图片</strong><small>{conversionItem.kind === 'pdf' ? '每页一张 PNG' : '每页一张 PNG'}</small></span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {isProcessing && <ProgressPanel label={progressLabel} progress={progress} />}
                   {!isProcessing && activeResult && (
                     <OutputPanel result={activeResult} onDownload={() => downloadResult(activeResult)} onReset={resetActiveTask} />
@@ -722,14 +1245,14 @@ function App() {
                     <div className="helper-message"><CircleAlert size={14} /> 再添加一个 PDF 才能合并 </div>
                   )}
 
-                  {!isProcessing && !activeResult && activeItems.length > 0 && (
+                  {!isProcessing && !activeResult && activeItemCount > 0 && (
                     <button className="primary-button process-button" type="button" disabled={!canProcess} onClick={() => void processFiles()}>
-                      {mode === 'merge' ? `合并 ${mergeItems.length} 个 PDF` : '压缩 PDF'}
+                      {mode === 'merge' ? `合并 ${mergeItems.length} 个 PDF` : mode === 'compress' ? '压缩 PDF' : conversionFormat === 'pdf' ? '转换为 PDF' : '转换为图片'}
                       <span className="button-arrow">↗</span>
                     </button>
                   )}
 
-                  {!isProcessing && !activeResult && !activeItems.length && (
+                  {!isProcessing && !activeResult && !activeItemCount && (
                     <div className="empty-footnote"><ShieldCheck size={14} /> 本地处理 · 文件不会上传</div>
                   )}
                 </motion.div>
@@ -744,7 +1267,7 @@ function App() {
         </div>
       </main>
 
-      <input ref={inputRef} className="visually-hidden" type="file" accept="application/pdf,.pdf" multiple={mode === 'merge'} onChange={handleBrowse} />
+      <input ref={inputRef} className="visually-hidden" type="file" accept={mode === 'convert' ? 'application/pdf,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*' : 'application/pdf,.pdf'} multiple={mode === 'merge'} onChange={handleBrowse} />
 
       <AnimatePresence>
         {toasts.length > 0 && (

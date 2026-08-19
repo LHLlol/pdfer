@@ -1112,6 +1112,103 @@ h2 {
   cursor: pointer;
 }
 
+.conversion-file-card {
+  margin-bottom: 0;
+}
+
+.file-icon-word {
+  border-color: rgba(47, 107, 255, 0.18);
+  color: var(--blue);
+  background: rgba(47, 107, 255, 0.07);
+}
+
+.file-icon-pdf {
+  border-color: rgba(200, 77, 89, 0.16);
+  color: var(--red);
+  background: rgba(200, 77, 89, 0.07);
+}
+
+.file-icon-image {
+  border-color: rgba(35, 139, 101, 0.17);
+  color: var(--green);
+  background: rgba(35, 139, 101, 0.07);
+}
+
+.convert-setup {
+  display: grid;
+  gap: 25px;
+}
+
+.convert-format-block {
+  padding-top: 1px;
+}
+
+.convert-format-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.convert-format-switch button {
+  display: flex;
+  min-height: 74px;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 13px;
+  color: var(--ink-muted);
+  background: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 160ms var(--ease), background 160ms var(--ease), color 160ms var(--ease), box-shadow 160ms var(--ease);
+}
+
+.convert-format-switch button:hover {
+  border-color: rgba(47, 107, 255, 0.2);
+  color: var(--ink-soft);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.convert-format-switch button.is-active {
+  border-color: rgba(47, 107, 255, 0.42);
+  color: var(--blue);
+  background: rgba(47, 107, 255, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(47, 107, 255, 0.06);
+}
+
+.convert-format-switch button > svg {
+  flex: 0 0 auto;
+}
+
+.convert-format-switch button span {
+  display: grid;
+  gap: 3px;
+}
+
+.convert-format-switch strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.convert-format-switch small {
+  color: var(--ink-muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.conversion-output-panel .output-detail {
+  gap: 5px;
+}
+
+.conversion-source {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .visually-hidden {
   display: none;
 }
@@ -1259,6 +1356,10 @@ h2 {
 
   .output-actions .text-button {
     justify-content: center;
+  }
+
+  .convert-format-switch {
+    grid-template-columns: 1fr;
   }
 }
 
