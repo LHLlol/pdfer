@@ -51,6 +51,8 @@ import { useMemo, useRef, useState } from 'react';
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
+const brandMarkUrl = `${import.meta.env.BASE_URL}zhiluo-icons/zhiluo-mark-ai-v1.png`;
+
 type Mode = 'merge' | 'compress' | 'convert';
 type ToastKind = 'error' | 'success' | 'info';
 type ConvertFormat = 'pdf' | 'image';
@@ -1228,7 +1230,7 @@ function App() {
       <header className="topbar">
         <div className="topbar-inner">
           <a className="brand" href="/" onClick={(event) => event.preventDefault()} aria-label="ZhiLuo 首页">
-            <img className="brand-mark" src="/zhiluo-icons/zhiluo-mark-ai-v1.png" alt="" aria-hidden="true" />
+            <img className="brand-mark" src={brandMarkUrl} alt="" aria-hidden="true" />
             <span>ZhiLuo</span>
           </a>
         </div>

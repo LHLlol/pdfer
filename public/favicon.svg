@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
   <title id="title">ZhiLuo</title>
   <rect width="512" height="512" fill="#FBF7F6"/>
-  <image href="/zhiluo-icons/icon-512.png" width="512" height="512" preserveAspectRatio="xMidYMid meet"/>
+  <image href="./icon-512.png" width="512" height="512" preserveAspectRatio="xMidYMid meet"/>
 </svg>
