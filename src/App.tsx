@@ -20,6 +20,7 @@ import {
   Plus,
   RotateCcw,
   ShieldCheck,
+  Stamp,
   UploadCloud,
   X,
 } from 'lucide-react';
@@ -48,12 +49,13 @@ import { jsPDF } from 'jspdf';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { useMemo, useRef, useState } from 'react';
+import { StampTool } from './components/StampTool';
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const brandMarkUrl = `${import.meta.env.BASE_URL}zhiluo-icons/zhiluo-mark-ai-v1.png`;
 
-type Mode = 'merge' | 'compress' | 'convert';
+type Mode = 'merge' | 'compress' | 'convert' | 'stamp';
 type ToastKind = 'error' | 'success' | 'info';
 type ConvertFormat = 'pdf' | 'image';
 type ConversionKind = 'word' | 'pdf' | 'image';
@@ -1001,6 +1003,7 @@ function App() {
   const [conversionItem, setConversionItem] = useState<ConversionItem | null>(null);
   const [conversionFormat, setConversionFormat] = useState<ConvertFormat>('pdf');
   const [conversionResult, setConversionResult] = useState<ConversionOutput | null>(null);
+  const [stampState, setStampState] = useState({ hasImage: false, hasResult: false });
   const [targetDraft, setTargetDraft] = useState('');
   const [targetUnit, setTargetUnit] = useState<'KB' | 'MB'>('MB');
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -1012,8 +1015,15 @@ function App() {
   );
 
   const activeItems = mode === 'merge' ? mergeItems : compressItems;
-  const activeItemCount = mode === 'convert' ? (conversionItem ? 1 : 0) : activeItems.length;
-  const activeResult = mode === 'merge' ? mergeResult : mode === 'compress' ? compressResult : conversionResult;
+  const activeItemCount = mode === 'stamp'
+    ? (stampState.hasImage ? 1 : 0)
+    : mode === 'convert' ? (conversionItem ? 1 : 0) : activeItems.length;
+  const activeResult = mode === 'merge'
+    ? mergeResult
+    : mode === 'compress'
+      ? compressResult
+      : mode === 'convert' ? conversionResult : null;
+  const activeHasResult = mode === 'stamp' ? stampState.hasResult : Boolean(activeResult);
   const compressItem = compressItems[0];
   const targetBytes = compressItem ? parseTargetSize(targetDraft, targetUnit) : null;
   const targetError = compressItem && targetDraft && !targetBytes
@@ -1021,7 +1031,9 @@ function App() {
     : compressItem && targetBytes && targetBytes >= compressItem.size
       ? '目标大小必须小于原始文件 '
       : null;
-  const canProcess = mode === 'merge'
+  const canProcess = mode === 'stamp'
+    ? false
+    : mode === 'merge'
     ? mergeItems.length >= 2
     : mode === 'compress'
       ? Boolean(compressItem && targetBytes && targetBytes < compressItem.size)
@@ -1219,7 +1231,7 @@ function App() {
       setMergeResult(null);
     } else if (mode === 'compress') {
       removeCompressItem();
-    } else {
+    } else if (mode === 'convert') {
       removeConversionItem();
     }
     setProgress(0);
@@ -1238,8 +1250,8 @@ function App() {
 
       <main className="main-content">
         <section className="intro-block" id="about">
-          <h1>处理 PDF，<em>从这里开始</em></h1>
-          <p className="intro-copy">合并、压缩或转换文件。无需账号，文件始终留在你的设备。</p>
+          <h1>处理工作，<em>从这里开始</em></h1>
+          <p className="intro-copy">合并、压缩、转换或抠图文件。无需账号，文件始终留在你的设备。</p>
           <div className={`mode-switch intro-mode-switch mode-${mode}`} role="tablist" aria-label="文件操作">
             <button className={mode === 'merge' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'merge'} onClick={() => switchMode('merge')}>
               <Combine size={20} strokeWidth={1.8} aria-hidden="true" />
@@ -1253,6 +1265,10 @@ function App() {
               <FileOutput size={20} strokeWidth={1.8} aria-hidden="true" />
               <span>格式转换</span>
             </button>
+            <button className={mode === 'stamp' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'stamp'} onClick={() => switchMode('stamp')}>
+              <Stamp size={20} strokeWidth={1.8} aria-hidden="true" />
+              <span>公章抠图</span>
+            </button>
           </div>
         </section>
 
@@ -1264,8 +1280,8 @@ function App() {
                 <span>当前工具</span>
               </div>
               <div>
-                <h2>{mode === 'merge' ? '合并 PDF' : mode === 'compress' ? '压缩 PDF' : '格式转换'}</h2>
-                <p>{mode === 'merge' ? '把多个文件按顺序合成一个 PDF。页面内容保持原样。' : mode === 'compress' ? '设定目标大小，减少文件体积，方便发送与存档。' : '在 Word、PDF 和图片之间转换，适合打印与分享。'}</p>
+                <h2>{mode === 'merge' ? '合并 PDF' : mode === 'compress' ? '压缩 PDF' : mode === 'convert' ? '格式转换' : '公章抠图'}</h2>
+                <p>{mode === 'merge' ? '把多个文件按顺序合成一个 PDF。页面内容保持原样。' : mode === 'compress' ? '设定目标大小，减少文件体积，方便发送与存档。' : mode === 'convert' ? '在 Word、PDF 和图片之间转换，适合打印与分享。' : '自动分离公章与纸张背景，输出透明 PNG。'}</p>
               </div>
               <div className="tool-steps" aria-label="处理流程">
                 <ToolStep
@@ -1277,19 +1293,22 @@ function App() {
                 <ToolStep
                   number="02"
                   title="设置参数"
-                  description={mode === 'merge' ? '确认文件顺序' : mode === 'compress' ? '调整目标大小' : '选择输出格式'}
-                  status={activeResult ? 'complete' : activeItemCount ? 'current' : 'upcoming'}
+                  description={mode === 'merge' ? '确认文件顺序' : mode === 'compress' ? '调整目标大小' : mode === 'convert' ? '选择输出格式' : '查看透明结果'}
+                  status={activeHasResult ? 'complete' : activeItemCount ? 'current' : 'upcoming'}
                 />
                 <ToolStep
                   number="03"
                   title="下载结果"
                   description="处理完成后保存文件"
-                  status={activeResult ? 'current' : 'upcoming'}
+                  status={activeHasResult ? 'current' : 'upcoming'}
                 />
               </div>
             </aside>
 
             <div className="task-content">
+              {mode === 'stamp' ? (
+                <StampTool onStateChange={setStampState} />
+              ) : (
               <AnimatePresence mode="wait" initial={false}>
                 <motion.div
                   key={mode}
@@ -1441,6 +1460,7 @@ function App() {
                   )}
                 </motion.div>
               </AnimatePresence>
+              )}
             </div>
           </div>
         </section>
