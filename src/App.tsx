@@ -662,6 +662,8 @@ async function createConversionOutput(
     onProgress(88);
   }
 
+  if (files.length === 0) throw new Error('转换没有生成可下载的文件');
+
   const download = files.length > 1
     ? await zipFiles(files, `${baseName}-images.zip`)
     : files[0];
@@ -996,6 +998,7 @@ function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const stampToolRef = useRef<StampToolHandle | null>(null);
+  const operationIdRef = useRef(0);
   const toastId = useRef(0);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -1160,6 +1163,7 @@ function App() {
 
   const switchMode = (nextMode: Mode) => {
     if (nextMode === mode) return;
+    operationIdRef.current += 1;
     setMode(nextMode);
     setIsDragging(false);
     setIsProcessing(false);
@@ -1197,47 +1201,62 @@ function App() {
 
   const processFiles = async () => {
     if (!canProcess || isProcessing) return;
+    const operationId = operationIdRef.current + 1;
+    operationIdRef.current = operationId;
+    const activeMode = mode;
+    const activeMergeItems = mergeItems;
+    const activeCompressItem = compressItem;
+    const activeTargetBytes = targetBytes;
+    const activeConversionItem = conversionItem;
+    const activeConversionFormat = conversionFormat;
+    const updateProgress = (value: number) => {
+      if (operationIdRef.current === operationId) setProgress(value);
+    };
+
     setIsProcessing(true);
-    setProgress(8);
-    setProgressLabel(mode === 'merge' ? '读取 PDF' : mode === 'compress' ? '分析 PDF' : '准备转换');
+    updateProgress(8);
+    setProgressLabel(activeMode === 'merge' ? '读取 PDF' : activeMode === 'compress' ? '分析 PDF' : '准备转换');
     try {
-      if (mode === 'merge') {
+      if (activeMode === 'merge') {
         setProgressLabel('合并页面');
-        const blob = await createMergedPdf(mergeItems, setProgress);
+        const blob = await createMergedPdf(activeMergeItems, updateProgress);
+        if (operationIdRef.current !== operationId) return;
         setProgressLabel('正在完成');
-        setProgress(100);
+        updateProgress(100);
         setMergeResult({
           blob,
           name: 'merged.pdf',
           size: blob.size,
-          originalSize: mergeItems.reduce((sum, item) => sum + item.size, 0),
+          originalSize: activeMergeItems.reduce((sum, item) => sum + item.size, 0),
           kind: 'merge',
         });
-      } else if (compressItem && targetBytes) {
+      } else if (activeMode === 'compress' && activeCompressItem && activeTargetBytes) {
         setProgressLabel('优化 PDF 结构');
-        const blob = await createCompressedPdf(compressItem, targetBytes, setProgress);
+        const blob = await createCompressedPdf(activeCompressItem, activeTargetBytes, updateProgress);
+        if (operationIdRef.current !== operationId) return;
         setProgressLabel('正在完成');
-        setProgress(100);
+        updateProgress(100);
         setCompressResult({
           blob,
-          name: `${compressItem.name.replace(/\.pdf$/i, '')}-compressed.pdf`,
+          name: `${activeCompressItem.name.replace(/\.pdf$/i, '')}-compressed.pdf`,
           size: blob.size,
-          originalSize: compressItem.size,
+          originalSize: activeCompressItem.size,
           kind: 'compress',
-          reachedTarget: blob.size <= targetBytes,
-          targetSize: targetBytes,
+          reachedTarget: blob.size <= activeTargetBytes,
+          targetSize: activeTargetBytes,
         });
-      } else if (mode === 'convert' && conversionItem) {
-        setProgressLabel(conversionFormat === 'pdf' ? '准备 PDF' : '渲染图片');
-        const result = await createConversionOutput(conversionItem, conversionFormat, setProgress);
+      } else if (activeMode === 'convert' && activeConversionItem) {
+        setProgressLabel(activeConversionFormat === 'pdf' ? '准备 PDF' : '渲染图片');
+        const result = await createConversionOutput(activeConversionItem, activeConversionFormat, updateProgress);
+        if (operationIdRef.current !== operationId) return;
         setProgressLabel('正在完成');
-        setProgress(100);
+        updateProgress(100);
         setConversionResult(result);
       }
     } catch (error) {
-      showToast(getFriendlyError(error), 'error');
+      if (operationIdRef.current === operationId) showToast(getFriendlyError(error), 'error');
     } finally {
-      setIsProcessing(false);
+      if (operationIdRef.current === operationId) setIsProcessing(false);
     }
   };
 
