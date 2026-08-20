@@ -1363,15 +1363,13 @@ function App() {
             </aside>
 
             <div className="task-content">
-              <AnimatePresence mode="wait" initial={false}>
-                <motion.div
-                  key={`workspace-${mode}`}
-                  className="workspace-mode"
-                  initial={shouldReduceMotion ? false : { opacity: 0, y: 8 }}
-                  animate={shouldReduceMotion ? { opacity: 1, y: 0 } : { opacity: 1, y: 0 }}
-                  exit={shouldReduceMotion ? { opacity: 1, y: 0 } : { opacity: 0, y: -8 }}
-                  transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.22, ease }}
-                >
+              <motion.div
+                key={`workspace-${mode}`}
+                className="workspace-mode"
+                initial={shouldReduceMotion ? false : { opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.22, ease }}
+              >
                   {mode === 'stamp' ? (
                     <StampTool ref={stampToolRef} isDragging={isDragging} onStateChange={setStampState} />
                   ) : (
@@ -1516,8 +1514,7 @@ function App() {
                   )}
                   </div>
                   )}
-                </motion.div>
-              </AnimatePresence>
+              </motion.div>
             </div>
           </div>
         </section>
