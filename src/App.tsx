@@ -1,6 +1,7 @@
 import {
   AnimatePresence,
   motion,
+  useReducedMotion,
 } from 'framer-motion';
 import {
   Check,
@@ -49,7 +50,8 @@ import { jsPDF } from 'jspdf';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { useMemo, useRef, useState } from 'react';
-import { StampTool } from './components/StampTool';
+import { Footer } from './components/Footer';
+import { StampTool, StampToolHandle } from './components/StampTool';
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -167,6 +169,13 @@ function getConversionLabel(kind: ConversionKind) {
   if (kind === 'word') return 'Word 文档';
   if (kind === 'pdf') return 'PDF 文件';
   return '图片文件';
+}
+
+function getModeLabel(mode: Mode) {
+  if (mode === 'merge') return '合并 PDF';
+  if (mode === 'compress') return '压缩 PDF';
+  if (mode === 'convert') return '格式转换';
+  return '公章抠图';
 }
 
 function getBaseName(name: string) {
@@ -736,42 +745,19 @@ function DropZone({
   hasFiles,
   isNewTask,
   isDragging,
-  onDragChange,
-  onDrop,
   onBrowse,
 }: {
   mode: Mode;
   hasFiles: boolean;
   isNewTask: boolean;
   isDragging: boolean;
-  onDragChange: (value: boolean) => void;
-  onDrop: (files: FileList | File[]) => void;
   onBrowse: () => void;
 }) {
-  const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'copy';
-    if (!isDragging) onDragChange(true);
-  };
-
-  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    onDragChange(false);
-    if (event.dataTransfer.files.length) onDrop(event.dataTransfer.files);
-  };
-
   return (
     <motion.div
       className={`drop-zone ${isDragging ? 'is-dragging' : ''} ${hasFiles ? 'has-files' : 'is-empty'}`}
       animate={{ scale: isDragging ? 1.012 : 1 }}
       transition={{ duration: 0.2, ease }}
-      onDragEnter={handleDragOver}
-      onDragOver={handleDragOver}
-      onDragLeave={(event) => {
-        const nextTarget = event.relatedTarget as Node | null;
-        if (!nextTarget || !event.currentTarget.contains(nextTarget)) onDragChange(false);
-      }}
-      onDrop={handleDrop}
       onClick={onBrowse}
       role="button"
       tabIndex={0}
@@ -991,6 +977,7 @@ function OutputPanel({
 }
 
 function App() {
+  const shouldReduceMotion = useReducedMotion();
   const [mode, setMode] = useState<Mode>('merge');
   const [mergeItems, setMergeItems] = useState<PdfItem[]>([]);
   const [compressItems, setCompressItems] = useState<PdfItem[]>([]);
@@ -1008,6 +995,7 @@ function App() {
   const [targetUnit, setTargetUnit] = useState<'KB' | 'MB'>('MB');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const stampToolRef = useRef<StampToolHandle | null>(null);
   const toastId = useRef(0);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -1129,6 +1117,47 @@ function App() {
     }
   };
 
+  const isFileDrag = (event: React.DragEvent<HTMLDivElement>) => (
+    Array.from(event.dataTransfer.types).includes('Files')
+  );
+
+  const handlePageDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handlePageDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    if (!isDragging) setIsDragging(true);
+  };
+
+  const handlePageDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget as Node | null;
+    if (!nextTarget || !event.currentTarget.contains(nextTarget)) setIsDragging(false);
+  };
+
+  const handlePageDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    const hasFiles = event.dataTransfer.files.length > 0;
+    if (!hasFiles && !isFileDrag(event)) return;
+    event.preventDefault();
+    setIsDragging(false);
+    if (!hasFiles) return;
+
+    if (isProcessing) {
+      showToast('当前任务正在处理中，请稍候再上传 ', 'info');
+      return;
+    }
+
+    if (mode === 'stamp') {
+      stampToolRef.current?.uploadFiles(event.dataTransfer.files);
+      return;
+    }
+    void addFiles(event.dataTransfer.files);
+  };
+
   const switchMode = (nextMode: Mode) => {
     if (nextMode === mode) return;
     setMode(nextMode);
@@ -1238,7 +1267,13 @@ function App() {
   };
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      onDragEnter={handlePageDragEnter}
+      onDragOver={handlePageDragOver}
+      onDragLeave={handlePageDragLeave}
+      onDrop={handlePageDrop}
+    >
       <header className="topbar">
         <div className="topbar-inner">
           <a className="brand" href="/" onClick={(event) => event.preventDefault()} aria-label="ZhiLuo 首页">
@@ -1250,7 +1285,10 @@ function App() {
 
       <main className="main-content">
         <section className="intro-block" id="about">
-          <h1>处理工作，<em>从这里开始</em></h1>
+          <h1 className="hero-title">
+            <span>处理工作，</span>
+            <em>从这里开始</em>
+          </h1>
           <p className="intro-copy">合并、压缩、转换或抠图文件。无需账号，文件始终留在你的设备。</p>
           <div className={`mode-switch intro-mode-switch mode-${mode}`} role="tablist" aria-label="文件操作">
             <button className={mode === 'merge' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'merge'} onClick={() => switchMode('merge')}>
@@ -1281,7 +1319,7 @@ function App() {
               </div>
               <div>
                 <h2>{mode === 'merge' ? '合并 PDF' : mode === 'compress' ? '压缩 PDF' : mode === 'convert' ? '格式转换' : '公章抠图'}</h2>
-                <p>{mode === 'merge' ? '把多个文件按顺序合成一个 PDF。页面内容保持原样。' : mode === 'compress' ? '设定目标大小，减少文件体积，方便发送与存档。' : mode === 'convert' ? '在 Word、PDF 和图片之间转换，适合打印与分享。' : '自动分离公章与纸张背景，输出透明 PNG。'}</p>
+                <p>{mode === 'merge' ? '把多个文件按顺序合成一个 PDF。页面内容保持原样。' : mode === 'compress' ? '设定目标大小，减少文件体积，方便发送与存档。' : mode === 'convert' ? '在 Word、PDF 和图片之间转换，适合打印与分享。' : '自动寻找图片或 PDF 页面中的公章，放大并分离纸张背景，输出透明 PNG。'}</p>
               </div>
               <div className="tool-steps" aria-label="处理流程">
                 <ToolStep
@@ -1293,7 +1331,7 @@ function App() {
                 <ToolStep
                   number="02"
                   title="设置参数"
-                  description={mode === 'merge' ? '确认文件顺序' : mode === 'compress' ? '调整目标大小' : mode === 'convert' ? '选择输出格式' : '查看透明结果'}
+                  description={mode === 'merge' ? '确认文件顺序' : mode === 'compress' ? '调整目标大小' : mode === 'convert' ? '选择输出格式' : '定位并查看透明结果'}
                   status={activeHasResult ? 'complete' : activeItemCount ? 'current' : 'upcoming'}
                 />
                 <ToolStep
@@ -1306,18 +1344,19 @@ function App() {
             </aside>
 
             <div className="task-content">
-              {mode === 'stamp' ? (
-                <StampTool onStateChange={setStampState} />
-              ) : (
               <AnimatePresence mode="wait" initial={false}>
                 <motion.div
-                  key={mode}
-                  className="mode-content"
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -5 }}
-                  transition={{ duration: 0.2, ease }}
+                  key={`workspace-${mode}`}
+                  className="workspace-mode"
+                  initial={shouldReduceMotion ? false : { opacity: 0, y: 8 }}
+                  animate={shouldReduceMotion ? { opacity: 1, y: 0 } : { opacity: 1, y: 0 }}
+                  exit={shouldReduceMotion ? { opacity: 1, y: 0 } : { opacity: 0, y: -8 }}
+                  transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.22, ease }}
                 >
+                  {mode === 'stamp' ? (
+                    <StampTool ref={stampToolRef} isDragging={isDragging} onStateChange={setStampState} />
+                  ) : (
+                  <div className="mode-content">
                   <div className="task-heading">
                     <div>
                       <h2>{mode === 'merge' ? '添加 PDF 文件' : mode === 'compress' ? '添加一个 PDF' : '添加要转换的文件'}</h2>
@@ -1331,8 +1370,6 @@ function App() {
                       hasFiles={activeItemCount > 0}
                       isNewTask={Boolean(activeResult)}
                       isDragging={isDragging}
-                      onDragChange={setIsDragging}
-                      onDrop={addFiles}
                       onBrowse={openFilePicker}
                     />
                   )}
@@ -1458,9 +1495,10 @@ function App() {
                   {!isProcessing && !activeResult && !activeItemCount && (
                     <div className="empty-footnote"><ShieldCheck size={14} /> 本地处理 · 文件不会上传</div>
                   )}
+                  </div>
+                  )}
                 </motion.div>
               </AnimatePresence>
-              )}
             </div>
           </div>
         </section>
@@ -1470,7 +1508,19 @@ function App() {
         </div>
       </main>
 
+      <Footer />
+
       <input ref={inputRef} className="visually-hidden" type="file" accept={mode === 'convert' ? 'application/pdf,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*' : 'application/pdf,.pdf'} multiple={mode === 'merge'} onChange={handleBrowse} />
+
+      {isDragging && (
+        <div className="page-drop-overlay" role="status" aria-live="polite">
+          <div className="page-drop-card">
+            <span className="page-drop-icon" aria-hidden="true"><UploadCloud size={26} strokeWidth={1.6} /></span>
+            <strong>松开以上传到「{getModeLabel(mode)}」</strong>
+            <span>文件会默认在当前工作区内处理</span>
+          </div>
+        </div>
+      )}
 
       <AnimatePresence>
         {toasts.length > 0 && (

@@ -1,4 +1,9 @@
+import { getDocument } from 'pdfjs-dist';
+import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
+
 export type StampProgressHandler = (progress: number, label: string) => void;
+
+export type StampSourceKind = 'image' | 'pdf';
 
 export type StampCrop = {
   imageData: ImageData;
@@ -17,6 +22,9 @@ export type StampPreview = {
   confidence: number;
   alphaCoverage: number;
   redPixelRatio: number;
+  sourceKind: StampSourceKind;
+  pageNumber?: number;
+  pageCount?: number;
 };
 
 export type StampAnalysis = {
@@ -31,12 +39,26 @@ export type StampAnalysis = {
   alphaCoverage: number;
   redPixelRatio: number;
   isLikelyStamp: boolean;
+  sourceKind: StampSourceKind;
+  pageNumber?: number;
+  pageCount?: number;
 };
 
 type LabColor = { l: number; a: number; b: number };
 type BackgroundColor = { r: number; g: number; b: number; lab: LabColor };
+type StampMask = {
+  output: ImageData;
+  bounds: { x: number; y: number; width: number; height: number };
+  confidence: number;
+  alphaCoverage: number;
+  redPixelRatio: number;
+};
 
 const PREVIEW_MAX_DIMENSION = 1500;
+const PDF_SCAN_MAX_DIMENSION = 1400;
+const PDF_OUTPUT_MAX_DIMENSION = 2800;
+const PDF_SCAN_SCALE = 1.45;
+const PDF_OUTPUT_SCALE = 2.8;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -142,7 +164,7 @@ function hueDistanceToRed(hue: number) {
   return Math.min(hue, 1 - hue);
 }
 
-function buildStampMask(imageData: ImageData, onProgress?: (progress: number) => void) {
+function buildStampMask(imageData: ImageData, onProgress?: (progress: number) => void): StampMask {
   const { width, height, data } = imageData;
   const background = estimateBackground(imageData);
   const alpha = new Uint8Array(width * height);
@@ -341,11 +363,154 @@ async function loadSourceImageData(file: File) {
   }
 }
 
+function isPdfFile(file: File) {
+  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+}
+
+function getPdfRenderScale(page: PDFPageProxy, maxDimension: number, preferredScale: number) {
+  const baseViewport = page.getViewport({ scale: 1 });
+  return Math.min(
+    preferredScale,
+    maxDimension / Math.max(baseViewport.width, baseViewport.height),
+  );
+}
+
+async function renderPdfPageImageData(
+  pdf: PDFDocumentProxy,
+  pageNumber: number,
+  maxDimension: number,
+  preferredScale: number,
+) {
+  const page = await pdf.getPage(pageNumber);
+  const scale = getPdfRenderScale(page, maxDimension, preferredScale);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.ceil(viewport.width));
+  canvas.height = Math.max(1, Math.ceil(viewport.height));
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+
+  if (!context) {
+    page.cleanup();
+    throw new Error('无法创建 PDF 页面画布');
+  }
+
+  try {
+    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    return context.getImageData(0, 0, canvas.width, canvas.height);
+  } finally {
+    page.cleanup();
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+}
+
+function scorePdfStampCandidate(mask: StampMask) {
+  // A page without a red signal should never win just because its fallback
+  // bounds cover the whole page. This keeps blank/text-only pages out of the
+  // automatic page selection.
+  const redSignal = smoothstep(0.00005, 0.012, mask.redPixelRatio);
+  const alphaSignal = smoothstep(0.00005, 0.08, mask.alphaCoverage);
+  return redSignal * 0.5 + alphaSignal * 0.3 + mask.confidence * 0.2;
+}
+
+async function processStampPdfFile(
+  file: File,
+  onProgress: StampProgressHandler,
+  onPreview?: (preview: StampPreview) => void,
+): Promise<StampAnalysis> {
+  onProgress(8, '正在读取 PDF');
+  const loadingTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+  let pdf: PDFDocumentProxy | null = null;
+
+  try {
+    pdf = await loadingTask.promise;
+    if (pdf.numPages < 1) throw new Error('这个 PDF 不包含可用页面');
+    onProgress(12, `正在查找公章 · 共 ${pdf.numPages} 页`);
+
+    let bestCandidate: { pageNumber: number; imageData: ImageData; mask: StampMask; score: number } | null = null;
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const scanImage = await renderPdfPageImageData(
+        pdf,
+        pageNumber,
+        PDF_SCAN_MAX_DIMENSION,
+        PDF_SCAN_SCALE,
+      );
+      const scanMask = buildStampMask(scanImage);
+      const score = scorePdfStampCandidate(scanMask);
+      if (!bestCandidate || score > bestCandidate.score) {
+        bestCandidate = { pageNumber, imageData: scanImage, mask: scanMask, score };
+      }
+      onProgress(
+        12 + (pageNumber / pdf.numPages) * 52,
+        `正在查找公章 · 第 ${pageNumber} / ${pdf.numPages} 页`,
+      );
+      await yieldToBrowser();
+    }
+
+    if (!bestCandidate) throw new Error('这个 PDF 不包含可用页面');
+    const previewCrop = cropStampImageData(bestCandidate.mask.output, bestCandidate.mask.bounds);
+    const previewBlob = await imageDataToPngBlob(previewCrop.imageData);
+    onPreview?.({
+      outputImageData: bestCandidate.mask.output,
+      crop: previewCrop,
+      blob: previewBlob,
+      width: bestCandidate.imageData.width,
+      height: bestCandidate.imageData.height,
+      confidence: bestCandidate.mask.confidence,
+      alphaCoverage: bestCandidate.mask.alphaCoverage,
+      redPixelRatio: bestCandidate.mask.redPixelRatio,
+      sourceKind: 'pdf',
+      pageNumber: bestCandidate.pageNumber,
+      pageCount: pdf.numPages,
+    });
+
+    onProgress(70, `已定位第 ${bestCandidate.pageNumber} 页，正在放大印章`);
+    await yieldToBrowser();
+    const source = await renderPdfPageImageData(
+      pdf,
+      bestCandidate.pageNumber,
+      PDF_OUTPUT_MAX_DIMENSION,
+      PDF_OUTPUT_SCALE,
+    );
+    const fullMask = buildStampMask(source, (value) => onProgress(70 + value * 0.32, '正在优化边缘'));
+    const crop = cropStampImageData(fullMask.output, fullMask.bounds);
+    const [fullBlob, cropBlob] = await Promise.all([
+      imageDataToPngBlob(fullMask.output),
+      imageDataToPngBlob(crop.imageData),
+    ]);
+    onProgress(100, '处理完成');
+    return {
+      sourceImageData: source,
+      outputImageData: fullMask.output,
+      crop,
+      fullBlob,
+      cropBlob,
+      width: source.width,
+      height: source.height,
+      confidence: fullMask.confidence,
+      alphaCoverage: fullMask.alphaCoverage,
+      redPixelRatio: fullMask.redPixelRatio,
+      isLikelyStamp: fullMask.redPixelRatio > 0.00015 && fullMask.alphaCoverage > 0.00015,
+      sourceKind: 'pdf',
+      pageNumber: bestCandidate.pageNumber,
+      pageCount: pdf.numPages,
+    };
+  } finally {
+    try {
+      if (pdf) await pdf.cleanup();
+    } finally {
+      await loadingTask.destroy();
+    }
+  }
+}
+
 export async function processStampFile(
   file: File,
   onProgress: StampProgressHandler,
   onPreview?: (preview: StampPreview) => void,
 ): Promise<StampAnalysis> {
+  if (isPdfFile(file)) return processStampPdfFile(file, onProgress, onPreview);
+
   const source = await loadSourceImageData(file);
   onProgress(12, '正在读取图片');
   await yieldToBrowser();
@@ -364,6 +529,7 @@ export async function processStampFile(
     confidence: previewMask.confidence,
     alphaCoverage: previewMask.alphaCoverage,
     redPixelRatio: previewMask.redPixelRatio,
+    sourceKind: 'image',
   });
   onProgress(70, '预览已就绪，正在保留原始分辨率');
   await yieldToBrowser();
@@ -387,5 +553,6 @@ export async function processStampFile(
     alphaCoverage: fullMask.alphaCoverage,
     redPixelRatio: fullMask.redPixelRatio,
     isLikelyStamp: fullMask.redPixelRatio > 0.00015 && fullMask.alphaCoverage > 0.00015,
+    sourceKind: 'image',
   };
 }

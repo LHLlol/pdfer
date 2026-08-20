@@ -4,6 +4,8 @@ import {
   CircleAlert,
   Download,
   Eraser,
+  FileText,
+  GripVertical,
   ImagePlus,
   Redo2,
   RotateCcw,
@@ -11,10 +13,11 @@ import {
   Undo2,
   UploadCloud,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import {
   StampAnalysis,
   StampCrop,
+  StampSourceKind,
   cropStampImageData,
   imageDataToPngBlob,
   processStampFile,
@@ -35,6 +38,9 @@ type StampDisplay = {
   alphaCoverage: number;
   redPixelRatio: number;
   isLikelyStamp: boolean;
+  sourceKind: StampSourceKind;
+  pageNumber?: number;
+  pageCount?: number;
   isPreviewOnly: boolean;
   version: number;
 };
@@ -46,6 +52,11 @@ type StampToolState = {
 
 type StampToolProps = {
   onStateChange?: (state: StampToolState) => void;
+  isDragging?: boolean;
+};
+
+export type StampToolHandle = {
+  uploadFiles: (files: FileList | File[]) => void;
 };
 
 const ease = [0.22, 1, 0.36, 1] as const;
@@ -70,6 +81,14 @@ function isStampImage(file: File) {
     || file.type === 'image/jpg'
     || file.type === 'image/webp'
     || /\.(png|jpe?g|webp)$/i.test(file.name);
+}
+
+function isStampPdf(file: File) {
+  return file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+}
+
+function isStampSource(file: File) {
+  return isStampImage(file) || isStampPdf(file);
 }
 
 function copyCropFromRect(imageData: ImageData, crop: StampCrop): StampCrop {
@@ -98,6 +117,9 @@ function displayFromAnalysis(analysis: StampAnalysis, isPreviewOnly = false): St
     alphaCoverage: analysis.alphaCoverage,
     redPixelRatio: analysis.redPixelRatio,
     isLikelyStamp: analysis.isLikelyStamp,
+    sourceKind: analysis.sourceKind,
+    pageNumber: analysis.pageNumber,
+    pageCount: analysis.pageCount,
     isPreviewOnly,
     version: 0,
   };
@@ -106,10 +128,106 @@ function displayFromAnalysis(analysis: StampAnalysis, isPreviewOnly = false): St
 function drawCanvas(canvas: HTMLCanvasElement | null, display: StampDisplay | null, outputMode: StampOutputMode) {
   if (!canvas || !display) return;
   const imageData = outputMode === 'crop' ? display.crop.imageData : display.fullOutputImageData;
+  drawImageDataCanvas(canvas, imageData);
+}
+
+function drawImageDataCanvas(canvas: HTMLCanvasElement | null, imageData: ImageData) {
+  if (!canvas) return;
   canvas.width = imageData.width;
   canvas.height = imageData.height;
   const context = canvas.getContext('2d');
   if (context) context.putImageData(imageData, 0, 0);
+}
+
+function StampComparison({
+  display,
+  sourceUrl,
+  previewBackground,
+  position,
+  isPlaying,
+  onChange,
+  onInteract,
+  onReplay,
+}: {
+  display: StampDisplay;
+  sourceUrl: string | null;
+  previewBackground: PreviewBackground;
+  position: number;
+  isPlaying: boolean;
+  onChange: (value: number) => void;
+  onInteract: () => void;
+  onReplay: () => void;
+}) {
+  const comparisonCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const comparisonMaxWidth = Math.min(620, Math.max(180, Math.round((340 * display.width) / Math.max(1, display.height))));
+
+  useLayoutEffect(() => {
+    drawImageDataCanvas(comparisonCanvasRef.current, display.fullOutputImageData);
+  }, [display]);
+
+  return (
+    <section className="stamp-comparison-card" aria-label="原图与透明结果对比">
+      <div className="stamp-comparison-heading">
+        <div className="stamp-comparison-title">
+          <span className="section-label">左右拖动对比</span>
+          <strong>抠图前 · 抠图后</strong>
+        </div>
+        <div className="stamp-comparison-actions">
+          <span className={`stamp-comparison-status ${isPlaying ? 'is-playing' : ''}`} aria-live="polite">
+            {isPlaying ? '正在展示抠图效果' : '拖动分割线查看'}
+          </span>
+          <button className="stamp-comparison-replay" type="button" onClick={onReplay}>
+            <RotateCcw size={13} strokeWidth={1.8} />
+            重播
+          </button>
+        </div>
+      </div>
+
+      <div className={`stamp-comparison-stage stamp-bg-${previewBackground}`}>
+        <div
+          className={`stamp-comparison-media stamp-bg-${previewBackground}`}
+          style={{
+            aspectRatio: `${display.width} / ${display.height}`,
+            width: `min(100%, ${comparisonMaxWidth}px)`,
+          }}
+        >
+          <div className="stamp-comparison-before" style={{ clipPath: `inset(0 0 0 ${position}%)` }}>
+            <img
+              src={sourceUrl ?? ''}
+              alt={display.sourceKind === 'pdf' ? '公章所在 PDF 页面原图' : '公章原图'}
+            />
+          </div>
+          <div className="stamp-comparison-after" style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }} aria-hidden="true">
+            <canvas ref={comparisonCanvasRef} aria-label="透明公章结果" />
+          </div>
+          <span className="stamp-comparison-tag stamp-comparison-tag-after">去底结果</span>
+          <span className="stamp-comparison-tag stamp-comparison-tag-before">原图</span>
+          <div className="stamp-comparison-divider" style={{ left: `${position}%` }} aria-hidden="true">
+            <span className="stamp-comparison-handle"><GripVertical size={15} strokeWidth={1.9} /></span>
+          </div>
+          <input
+            className="stamp-comparison-slider"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={position}
+            aria-label="拖动滑块比较原图与抠图结果"
+            aria-valuetext={`${Math.round(position)}% 显示去底结果`}
+            onPointerDown={onInteract}
+            onKeyDown={onInteract}
+            onChange={(event) => onChange(Number(event.target.value))}
+          />
+        </div>
+      </div>
+
+      <div className="stamp-comparison-caption">
+        <span><i className="stamp-caption-dot is-blue" />左侧为透明去底结果</span>
+        <span>滑块可拖动 · 支持键盘方向键</span>
+        <span><i className="stamp-caption-dot is-muted" />右侧为原图</span>
+      </div>
+    </section>
+  );
 }
 
 function downloadBlob(blob: Blob, name: string) {
@@ -125,13 +243,9 @@ function downloadBlob(blob: Blob, name: string) {
 
 function StampDropZone({
   isDragging,
-  onDragChange,
-  onDrop,
   onBrowse,
 }: {
   isDragging: boolean;
-  onDragChange: (value: boolean) => void;
-  onDrop: (files: FileList | File[]) => void;
   onBrowse: () => void;
 }) {
   return (
@@ -139,35 +253,17 @@ function StampDropZone({
       className={`drop-zone stamp-drop-zone ${isDragging ? 'is-dragging' : ''} is-empty`}
       animate={{ scale: isDragging ? 1.012 : 1 }}
       transition={{ duration: 0.2, ease }}
-      onDragEnter={(event) => {
-        event.preventDefault();
-        onDragChange(true);
-      }}
-      onDragOver={(event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'copy';
-        onDragChange(true);
-      }}
-      onDragLeave={(event) => {
-        const nextTarget = event.relatedTarget as Node | null;
-        if (!nextTarget || !event.currentTarget.contains(nextTarget)) onDragChange(false);
-      }}
-      onDrop={(event) => {
-        event.preventDefault();
-        onDragChange(false);
-        if (event.dataTransfer.files.length) onDrop(event.dataTransfer.files);
-      }}
       onClick={onBrowse}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') onBrowse();
       }}
       role="button"
       tabIndex={0}
-      aria-label="选择要抠图的公章图片"
+      aria-label="选择要抠图的公章图片或 PDF 文件"
     >
       <span className="upload-mark" aria-hidden="true"><UploadCloud size={24} strokeWidth={1.55} /></span>
-      <span className="drop-title">{isDragging ? '松开鼠标，开始抠图' : '把公章图片拖到这里'}</span>
-      <span className="drop-subtitle">或点击选择 · 也可以直接粘贴图片 · PNG / JPG / WebP</span>
+      <span className="drop-title">{isDragging ? '松开鼠标，开始寻找公章' : '把图片或 PDF 拖到这里'}</span>
+      <span className="drop-subtitle">或点击选择 · 也可以直接粘贴图片 · PDF / PNG / JPG / WebP</span>
     </motion.div>
   );
 }
@@ -193,7 +289,7 @@ function StampProgress({ progress, label }: { progress: number; label: string })
   );
 }
 
-export function StampTool({ onStateChange }: StampToolProps) {
+export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function StampTool({ onStateChange, isDragging = false }, ref) {
   const [file, setFile] = useState<File | null>(null);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [display, setDisplay] = useState<StampDisplay | null>(null);
@@ -201,7 +297,6 @@ export function StampTool({ onStateChange }: StampToolProps) {
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState('准备图片');
   const [errorMessage, setErrorMessage] = useState('');
-  const [isDragging, setIsDragging] = useState(false);
   const [outputMode, setOutputMode] = useState<StampOutputMode>('crop');
   const [previewBackground, setPreviewBackground] = useState<PreviewBackground>('transparent');
   const [editorMode, setEditorMode] = useState<EditorMode>('erase');
@@ -210,12 +305,17 @@ export function StampTool({ onStateChange }: StampToolProps) {
   const [canRedo, setCanRedo] = useState(false);
   const [exportBlob, setExportBlob] = useState<Blob | null>(null);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
+  const [comparePosition, setComparePosition] = useState(10);
+  const [isComparePlaying, setIsComparePlaying] = useState(false);
+  const [compareReplayKey, setCompareReplayKey] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const displayRef = useRef<StampDisplay | null>(null);
   const historyRef = useRef<Uint8ClampedArray[]>([]);
   const redoRef = useRef<Uint8ClampedArray[]>([]);
   const paintingRef = useRef(false);
+  const compareAnimationRef = useRef<number | null>(null);
+  const compareInteractionRef = useRef(false);
 
   useLayoutEffect(() => {
     displayRef.current = display;
@@ -225,6 +325,47 @@ export function StampTool({ onStateChange }: StampToolProps) {
   useEffect(() => {
     onStateChange?.({ hasImage: Boolean(file), hasResult: Boolean(file && display && phase === 'done') });
   }, [display, file, onStateChange, phase]);
+
+  useEffect(() => {
+    if (phase !== 'done' || !display) return undefined;
+
+    compareInteractionRef.current = false;
+    setComparePosition(10);
+
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setIsComparePlaying(false);
+      setComparePosition(56);
+      return undefined;
+    }
+
+    setIsComparePlaying(true);
+    const start = window.performance.now();
+    const duration = 1350;
+    const initialPosition = 10;
+    const finalPosition = 88;
+
+    const animateComparison = (now: number) => {
+      if (compareInteractionRef.current) {
+        setIsComparePlaying(false);
+        return;
+      }
+      const progressValue = clamp((now - start) / duration, 0, 1);
+      const eased = 1 - ((1 - progressValue) ** 3);
+      setComparePosition(Math.round(initialPosition + ((finalPosition - initialPosition) * eased)));
+      if (progressValue < 1) {
+        compareAnimationRef.current = window.requestAnimationFrame(animateComparison);
+      } else {
+        setIsComparePlaying(false);
+        setComparePosition(56);
+      }
+    };
+
+    compareAnimationRef.current = window.requestAnimationFrame(animateComparison);
+    return () => {
+      if (compareAnimationRef.current !== null) window.cancelAnimationFrame(compareAnimationRef.current);
+      compareAnimationRef.current = null;
+    };
+  }, [phase, compareReplayKey]);
 
   useEffect(() => {
     if (!display || phase === 'processing') return;
@@ -270,18 +411,18 @@ export function StampTool({ onStateChange }: StampToolProps) {
   };
 
   const processFile = async (nextFile: File) => {
-    if (!isStampImage(nextFile)) {
-      setErrorMessage('暂不支持这个文件，请使用 PNG、JPG、JPEG 或 WebP 图片');
+    if (!isStampSource(nextFile)) {
+      setErrorMessage('暂不支持这个文件，请使用 PDF、PNG、JPG、JPEG 或 WebP');
       setPhase('error');
       return;
     }
     if (nextFile.size > 500 * 1024 * 1024) {
-      setErrorMessage('图片超过 500 MB 大小限制');
+      setErrorMessage('文件超过 500 MB 大小限制');
       setPhase('error');
       return;
     }
 
-    const nextSourceUrl = URL.createObjectURL(nextFile);
+    const nextSourceUrl = isStampImage(nextFile) ? URL.createObjectURL(nextFile) : null;
     setFile(nextFile);
     setSourceUrl(nextSourceUrl);
     setDisplay(null);
@@ -289,9 +430,12 @@ export function StampTool({ onStateChange }: StampToolProps) {
     setExportUrl(null);
     setErrorMessage('');
     setProgress(5);
-    setProgressLabel('正在读取图片');
+    setProgressLabel(isStampPdf(nextFile) ? '正在读取 PDF' : '正在读取图片');
     setPhase('processing');
     setOutputMode('crop');
+    compareInteractionRef.current = true;
+    setComparePosition(10);
+    setIsComparePlaying(false);
     resetHistory();
 
     try {
@@ -312,26 +456,38 @@ export function StampTool({ onStateChange }: StampToolProps) {
             alphaCoverage: preview.alphaCoverage,
             redPixelRatio: preview.redPixelRatio,
             isLikelyStamp: preview.redPixelRatio > 0.00015 && preview.alphaCoverage > 0.00015,
+            sourceKind: preview.sourceKind,
+            pageNumber: preview.pageNumber,
+            pageCount: preview.pageCount,
             isPreviewOnly: true,
             version: 0,
           });
         },
       );
+      if (analysis.sourceKind === 'pdf') {
+        const sourceBlob = await imageDataToPngBlob(analysis.sourceImageData);
+        setSourceUrl(URL.createObjectURL(sourceBlob));
+      }
       setDisplay(displayFromAnalysis(analysis));
       setPhase('done');
       setProgress(100);
       setProgressLabel('处理完成');
     } catch {
       setDisplay(null);
-      setErrorMessage('这张图片无法读取，请尝试 PNG、JPG 或 WebP 文件');
+      setErrorMessage(isStampPdf(nextFile)
+        ? '这个 PDF 无法读取，文件可能已损坏、加密或不包含可用页面'
+        : '这张图片无法读取，请尝试 PNG、JPG 或 WebP 文件');
       setPhase('error');
     }
   };
 
   const handleDrop = (files: FileList | File[]) => {
+    if (phase === 'processing') return;
     const nextFile = Array.from(files)[0];
     if (nextFile) void processFile(nextFile);
   };
+
+  useImperativeHandle(ref, () => ({ uploadFiles: handleDrop }), [handleDrop]);
 
   const updateDisplayAfterPaint = () => {
     const current = displayRef.current;
@@ -436,12 +592,21 @@ export function StampTool({ onStateChange }: StampToolProps) {
   };
 
   const resetTask = () => {
+    compareInteractionRef.current = true;
     setFile(null);
+    setSourceUrl(null);
     setDisplay(null);
     setPhase('idle');
     setProgress(0);
     setErrorMessage('');
+    setComparePosition(10);
+    setIsComparePlaying(false);
     resetHistory();
+  };
+
+  const handleCompareInteract = () => {
+    compareInteractionRef.current = true;
+    setIsComparePlaying(false);
   };
 
   const activeDimension = display
@@ -453,15 +618,15 @@ export function StampTool({ onStateChange }: StampToolProps) {
     <div className="stamp-tool">
       <div className="task-heading">
         <div>
-          <h2>{phase === 'done' ? '查看透明结果' : '添加公章图片'}</h2>
+          <h2>{phase === 'done' ? '对比抠图结果' : '添加公章文件'}</h2>
         </div>
-        <span className="task-description">自动识别红章，保留原始颜色与细节。</span>
+        <span className="task-description">自动寻找图片或 PDF 页面中的红章，左右拖动分割线查看去底前后差异。</span>
       </div>
 
       <AnimatePresence mode="wait" initial={false}>
         {!file && phase !== 'error' && (
           <motion.div key="stamp-empty" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.2, ease }}>
-            <StampDropZone isDragging={isDragging} onDragChange={setIsDragging} onDrop={handleDrop} onBrowse={() => inputRef.current?.click()} />
+            <StampDropZone isDragging={isDragging} onBrowse={() => inputRef.current?.click()} />
             <div className="empty-footnote"><Stamp size={14} strokeWidth={1.7} /> 本地处理 · 文件不会上传</div>
           </motion.div>
         )}
@@ -469,7 +634,7 @@ export function StampTool({ onStateChange }: StampToolProps) {
         {phase === 'error' && (
           <motion.div key="stamp-error" className="stamp-error-state" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.2, ease }}>
             <div className="stamp-error-copy"><CircleAlert size={18} /><span>{errorMessage}</span></div>
-            <button className="primary-button process-button" type="button" onClick={() => inputRef.current?.click()}>重新选择图片 <span className="button-arrow">↗</span></button>
+            <button className="primary-button process-button" type="button" onClick={() => inputRef.current?.click()}>重新选择文件 <span className="button-arrow">↗</span></button>
           </motion.div>
         )}
 
@@ -485,32 +650,20 @@ export function StampTool({ onStateChange }: StampToolProps) {
         {file && display && phase === 'done' && (
           <motion.div key="stamp-result" className="stamp-result" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.25, ease }}>
             <div className="stamp-file-bar">
-              <div className="stamp-file-copy"><span className="file-icon file-icon-image"><ImagePlus size={18} strokeWidth={1.7} /></span><span><strong title={file.name}>{file.name}</strong><small>{formatBytes(file.size)} · {display.width} × {display.height}</small></span></div>
+              <div className="stamp-file-copy"><span className={`file-icon ${display.sourceKind === 'pdf' ? 'file-icon-pdf' : 'file-icon-image'}`}>{display.sourceKind === 'pdf' ? <FileText size={18} strokeWidth={1.7} /> : <ImagePlus size={18} strokeWidth={1.7} />}</span><span><strong title={file.name}>{file.name}</strong><small>{formatBytes(file.size)} · {display.sourceKind === 'pdf' && display.pageNumber && display.pageCount ? `第 ${display.pageNumber} / ${display.pageCount} 页 · ` : ''}{display.width} × {display.height}</small></span></div>
               <button className="text-button" type="button" onClick={resetTask}><RotateCcw size={15} strokeWidth={1.8} /> 重新上传</button>
             </div>
 
-            <div className="stamp-preview-grid">
-              <figure className="stamp-preview-card">
-                <div className="stamp-preview-stage stamp-original-stage"><img src={sourceUrl ?? ''} alt="公章原图" /></div>
-                <figcaption><span>原图</span><small>Before</small></figcaption>
-              </figure>
-              <figure className="stamp-preview-card">
-                <div className={`stamp-preview-stage stamp-result-stage stamp-bg-${previewBackground}`}>
-                  <canvas
-                    ref={(node) => {
-                      canvasRef.current = node;
-                      if (node) drawCanvas(node, display, outputMode);
-                    }}
-                    aria-label="透明背景公章结果"
-                    onPointerDown={handlePointerDown}
-                    onPointerMove={(event) => { if (paintingRef.current) paintAt(event); }}
-                    onPointerUp={handlePointerUp}
-                    onPointerCancel={handlePointerUp}
-                  />
-                </div>
-                <figcaption><span>透明结果</span><small>{display.isPreviewOnly ? 'Preview' : 'After'}</small></figcaption>
-              </figure>
-            </div>
+            <StampComparison
+              display={display}
+              sourceUrl={sourceUrl}
+              previewBackground={previewBackground}
+              position={comparePosition}
+              isPlaying={isComparePlaying}
+              onChange={(value) => setComparePosition(value)}
+              onInteract={handleCompareInteract}
+              onReplay={() => setCompareReplayKey((value) => value + 1)}
+            />
 
             <div className="stamp-preview-options">
               <div className="stamp-option-group" role="tablist" aria-label="输出画布模式">
@@ -539,6 +692,26 @@ export function StampTool({ onStateChange }: StampToolProps) {
 
             {warning && <div className="helper-message stamp-warning"><CircleAlert size={14} /> 未能准确确认公章区域，结果仍已生成；可以重新处理或用擦除 / 恢复微调。</div>}
 
+            <figure className="stamp-preview-card stamp-editor-card">
+              <div className="stamp-editor-preview-heading">
+                <span className="section-label">细节调整画布</span>
+                <small>在这里擦除或恢复局部，左右对比会同步更新。</small>
+              </div>
+              <div className={`stamp-preview-stage stamp-result-stage stamp-bg-${previewBackground}`}>
+                <canvas
+                  ref={(node) => {
+                    canvasRef.current = node;
+                    if (node) drawCanvas(node, display, outputMode);
+                  }}
+                  aria-label="可编辑的透明背景公章结果"
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={(event) => { if (paintingRef.current) paintAt(event); }}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerUp}
+                />
+              </div>
+            </figure>
+
             <div className="stamp-result-footer">
               <div className="stamp-result-stats"><strong>{activeDimension}</strong><span>{outputMode === 'crop' ? '透明 PNG · 自动留白' : '透明 PNG · 原始分辨率'}</span></div>
               <button className="primary-button" type="button" disabled={!exportBlob} onClick={() => exportBlob && downloadBlob(exportBlob, `${getBaseName(file.name)}-transparent.png`)}><Download size={17} strokeWidth={1.9} /> 下载透明 PNG <span className="button-arrow">↗</span></button>
@@ -547,7 +720,7 @@ export function StampTool({ onStateChange }: StampToolProps) {
         )}
       </AnimatePresence>
 
-      <input ref={inputRef} className="visually-hidden" type="file" tabIndex={-1} aria-hidden="true" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" onChange={(event) => { if (event.target.files?.[0]) void processFile(event.target.files[0]); event.target.value = ''; }} />
+      <input ref={inputRef} className="visually-hidden" type="file" tabIndex={-1} aria-hidden="true" accept="application/pdf,image/png,image/jpeg,image/webp,.pdf,.png,.jpg,.jpeg,.webp" onChange={(event) => { if (event.target.files?.[0]) void processFile(event.target.files[0]); event.target.value = ''; }} />
     </div>
   );
-}
+});
