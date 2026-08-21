@@ -1551,6 +1551,10 @@ h2 {
 .stamp-option-group button { min-height: 27px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; color: var(--ink-muted); background: transparent; cursor: pointer; font-size: 9px; transition: border-color 160ms ease, color 160ms ease, background 160ms ease; }
 .stamp-option-group button:hover { color: var(--ink-soft); background: var(--paper); }
 .stamp-option-group button.is-active { border-color: var(--accent-border); color: var(--accent); background: var(--accent-soft); }
+.stamp-color-option { gap: 6px; }
+.stamp-color-toggle { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.stamp-color-swatch { display: inline-block; width: 9px; height: 9px; border: 1px solid rgba(255,255,255,0.7); border-radius: 50%; background: #af1414; box-shadow: 0 0 0 1px rgba(175,20,20,0.28); }
+.stamp-color-code { color: var(--ink-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
 .stamp-background-button { width: 21px; min-width: 21px; height: 21px; min-height: 21px !important; padding: 0 !important; border: 1px solid var(--line-strong) !important; border-radius: 50% !important; box-shadow: inset 0 0 0 3px var(--surface-soft); }
 .stamp-background-button.bg-transparent { background-color: #ffffff; background-image: linear-gradient(45deg, #d7d7d7 25%, transparent 25%), linear-gradient(-45deg, #d7d7d7 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7d7d7 75%), linear-gradient(-45deg, transparent 75%, #d7d7d7 75%); background-position: 0 0, 0 4px, 4px -4px, -4px 0; background-size: 8px 8px; }
 .stamp-background-button.bg-white { background: #ffffff; }

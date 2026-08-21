@@ -54,6 +54,22 @@ type StampMask = {
   redPixelRatio: number;
 };
 
+type RedComponent = {
+  pixelCount: number;
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+};
+
+type StampCircleCandidate = RedComponent & {
+  centerX: number;
+  centerY: number;
+  radiusX: number;
+  radiusY: number;
+  score: number;
+};
+
 const PREVIEW_MAX_DIMENSION = 1500;
 const PDF_SCAN_MAX_DIMENSION = 1400;
 const PDF_OUTPUT_MAX_DIMENSION = 2800;
@@ -185,6 +201,160 @@ function hueDistanceToRed(hue: number) {
   return Math.min(hue, 1 - hue);
 }
 
+function findRedComponents(warm: Uint8Array, width: number, height: number) {
+  const visited = new Uint8Array(width * height);
+  const components: RedComponent[] = [];
+  const minimumPixels = Math.max(8, Math.round(width * height * 0.000002));
+
+  for (let start = 0; start < warm.length; start += 1) {
+    if (!warm[start] || visited[start]) continue;
+
+    const queue = [start];
+    visited[start] = 1;
+    let head = 0;
+    let pixelCount = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+
+    while (head < queue.length) {
+      const pixelIndex = queue[head];
+      head += 1;
+      const x = pixelIndex % width;
+      const y = Math.floor(pixelIndex / width);
+      pixelCount += 1;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          if (!offsetX && !offsetY) continue;
+          const nextX = x + offsetX;
+          const nextY = y + offsetY;
+          if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) continue;
+          const nextIndex = nextY * width + nextX;
+          if (!warm[nextIndex] || visited[nextIndex]) continue;
+          visited[nextIndex] = 1;
+          queue.push(nextIndex);
+        }
+      }
+    }
+
+    if (pixelCount >= minimumPixels) {
+      components.push({ pixelCount, minX, minY, maxX, maxY });
+    }
+  }
+
+  return components;
+}
+
+function inspectCircularCandidate(
+  component: RedComponent,
+  warm: Uint8Array,
+  width: number,
+  height: number,
+  largestDiameter: number,
+): StampCircleCandidate | null {
+  const boxWidth = component.maxX - component.minX + 1;
+  const boxHeight = component.maxY - component.minY + 1;
+  const diameter = Math.max(boxWidth, boxHeight);
+  const aspect = Math.min(boxWidth, boxHeight) / Math.max(boxWidth, boxHeight);
+  const minimumDiameter = Math.max(32, Math.round(Math.min(width, height) * 0.03));
+  if (diameter < minimumDiameter || aspect < 0.46) return null;
+
+  const centerX = (component.minX + component.maxX) / 2;
+  const centerY = (component.minY + component.maxY) / 2;
+  const radiusX = Math.max(1, boxWidth / 2);
+  const radiusY = Math.max(1, boxHeight / 2);
+  const angularBins = new Uint8Array(72);
+  let outerPixels = 0;
+  let fittedOuterPixels = 0;
+  let pixelsInBox = 0;
+
+  for (let y = component.minY; y <= component.maxY; y += 1) {
+    for (let x = component.minX; x <= component.maxX; x += 1) {
+      if (!warm[y * width + x]) continue;
+      pixelsInBox += 1;
+      const normalizedX = (x - centerX) / radiusX;
+      const normalizedY = (y - centerY) / radiusY;
+      const radialDistance = Math.sqrt((normalizedX ** 2) + (normalizedY ** 2));
+      if (radialDistance < 0.78 || radialDistance > 1.14) continue;
+
+      outerPixels += 1;
+      if (radialDistance >= 0.86 && radialDistance <= 1.08) fittedOuterPixels += 1;
+      let angle = Math.atan2(normalizedY, normalizedX) / (Math.PI * 2);
+      if (angle < 0) angle += 1;
+      angularBins[Math.min(71, Math.floor(angle * 72))] = 1;
+    }
+  }
+
+  const angularCoverage = angularBins.reduce((sum, value) => sum + value, 0) / angularBins.length;
+  const radialFit = fittedOuterPixels / Math.max(1, outerPixels);
+  const areaDensity = pixelsInBox / Math.max(1, boxWidth * boxHeight);
+  const nearSquare = smoothstep(0.46, 0.88, aspect);
+  const outerRingScore = smoothstep(0.3, 0.76, angularCoverage);
+  const radialFitScore = smoothstep(0.32, 0.8, radialFit);
+  const scaleScore = smoothstep(minimumDiameter, Math.max(minimumDiameter + 12, Math.min(width, height) * 0.1), diameter);
+  const relativeSizeScore = smoothstep(0.18, 0.64, diameter / Math.max(1, largestDiameter));
+  const densityScore = 1 - smoothstep(0.36, 0.62, areaDensity);
+  const touchesEdge = component.minX <= 1 || component.minY <= 1 || component.maxX >= width - 2 || component.maxY >= height - 2;
+  const edgePenalty = touchesEdge ? 0.16 : 0;
+  const score = clamp(
+    nearSquare * 0.22
+      + outerRingScore * 0.42
+      + radialFitScore * 0.2
+      + scaleScore * 0.08
+      + relativeSizeScore * 0.08
+      + densityScore * 0.04
+      - edgePenalty,
+    0,
+    1,
+  );
+
+  // A red text glyph can be square, but it cannot usually supply a nearly
+  // complete, evenly spaced outer ring. Requiring both signals is what keeps
+  // nearby red document text out of the stamp region.
+  if (angularCoverage < 0.34 || radialFit < 0.3 || areaDensity > 0.44 || score < 0.34) return null;
+  return { ...component, centerX, centerY, radiusX, radiusY, score };
+}
+
+function selectStampCircle(warm: Uint8Array, width: number, height: number) {
+  const region = new Uint8Array(width * height);
+  const components = findRedComponents(warm, width, height);
+  if (!components.length) return { region, candidate: null as StampCircleCandidate | null };
+
+  const largestDiameter = components.reduce(
+    (largest, component) => Math.max(largest, component.maxX - component.minX + 1, component.maxY - component.minY + 1),
+    1,
+  );
+  let bestCandidate: StampCircleCandidate | null = null;
+  for (const component of components) {
+    const candidate = inspectCircularCandidate(component, warm, width, height, largestDiameter);
+    if (candidate && (!bestCandidate || candidate.score > bestCandidate.score)) bestCandidate = candidate;
+  }
+  if (!bestCandidate) return { region, candidate: null };
+
+  // Give the detected ring a small allowance for anti-aliased outer pixels,
+  // while keeping the mask geometrically tied to the circular stamp.
+  const regionRadiusX = bestCandidate.radiusX * 1.06;
+  const regionRadiusY = bestCandidate.radiusY * 1.06;
+  const minX = Math.max(0, Math.floor(bestCandidate.centerX - regionRadiusX));
+  const maxX = Math.min(width - 1, Math.ceil(bestCandidate.centerX + regionRadiusX));
+  const minY = Math.max(0, Math.floor(bestCandidate.centerY - regionRadiusY));
+  const maxY = Math.min(height - 1, Math.ceil(bestCandidate.centerY + regionRadiusY));
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const normalizedX = (x - bestCandidate.centerX) / regionRadiusX;
+      const normalizedY = (y - bestCandidate.centerY) / regionRadiusY;
+      if ((normalizedX ** 2) + (normalizedY ** 2) <= 1) region[y * width + x] = 1;
+    }
+  }
+  return { region, candidate: bestCandidate };
+}
+
 function buildStampMask(imageData: ImageData, onProgress?: (progress: number) => void): StampMask {
   const { width, height, data } = imageData;
   const background = estimateBackground(imageData);
@@ -228,8 +398,6 @@ function buildStampMask(imageData: ImageData, onProgress?: (progress: number) =>
       const inputAlpha = data[index + 3] / 255;
       const alphaValue = Math.round(edgeAlpha * inputAlpha * 255);
       alpha[pixelIndex] = alphaValue;
-      redPixelCount += 1;
-      if (alphaValue > 150) strongPixelCount += 1;
     }
     if (onProgress && y % Math.max(1, Math.floor(height / 10)) === 0) {
       onProgress((y / height) * 62);
@@ -257,6 +425,10 @@ function buildStampMask(imageData: ImageData, onProgress?: (progress: number) =>
     }
   }
 
+  const stampCircle = selectStampCircle(warm, width, height);
+  redPixelCount = 0;
+  strongPixelCount = 0;
+
   const output = new ImageData(width, height);
   let minX = width;
   let minY = height;
@@ -268,8 +440,10 @@ function buildStampMask(imageData: ImageData, onProgress?: (progress: number) =>
     for (let x = 0; x < width; x += 1) {
       const pixelIndex = y * width + x;
       const index = pixelIndex * 4;
-      const alphaValue = alpha[pixelIndex];
+      const alphaValue = stampCircle.region[pixelIndex] ? alpha[pixelIndex] : 0;
       output.data[index + 3] = alphaValue;
+      if (alphaValue > 0) redPixelCount += 1;
+      if (alphaValue > 150) strongPixelCount += 1;
       if (alphaValue < 2) continue;
 
       const a = alphaValue / 255;
@@ -311,7 +485,9 @@ function buildStampMask(imageData: ImageData, onProgress?: (progress: number) =>
     : { x: 0, y: 0, width, height };
   const redPixelRatio = redPixelCount / Math.max(1, width * height);
   const alphaCoverage = alphaPixelCount / Math.max(1, width * height);
-  const boundsCoverage = (bounds.width * bounds.height) / Math.max(1, width * height);
+  const boundsCoverage = stampCircle.candidate
+    ? (bounds.width * bounds.height) / Math.max(1, width * height)
+    : 0;
   const confidence = clamp(
     smoothstep(0.0005, 0.012, redPixelRatio) * 0.62
       + smoothstep(0.0005, 0.08, boundsCoverage) * 0.2

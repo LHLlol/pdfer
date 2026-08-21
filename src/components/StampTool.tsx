@@ -27,10 +27,14 @@ import {
 type StampOutputMode = 'crop' | 'canvas';
 type PreviewBackground = 'transparent' | 'white' | 'black' | 'gray';
 type EditorMode = 'erase' | 'restore';
+type StampColorMode = 'original' | 'standard';
 type StampPhase = 'idle' | 'processing' | 'done' | 'error';
+
+const STANDARD_STAMP_RED = { r: 0xAF, g: 0x14, b: 0x14 };
 
 type StampDisplay = {
   sourceImageData: ImageData;
+  rawOutputImageData: ImageData;
   fullOutputImageData: ImageData;
   crop: StampCrop;
   width: number;
@@ -107,11 +111,25 @@ function copyCropFromRect(imageData: ImageData, crop: StampCrop): StampCrop {
   return { imageData: next, x, y, width, height };
 }
 
-function displayFromAnalysis(analysis: StampAnalysis, isPreviewOnly = false): StampDisplay {
+function colorizeStampImageData(imageData: ImageData, mode: StampColorMode) {
+  const output = new ImageData(new Uint8ClampedArray(imageData.data), imageData.width, imageData.height);
+  if (mode === 'original') return output;
+  for (let index = 0; index < output.data.length; index += 4) {
+    if (output.data[index + 3] < 2) continue;
+    output.data[index] = STANDARD_STAMP_RED.r;
+    output.data[index + 1] = STANDARD_STAMP_RED.g;
+    output.data[index + 2] = STANDARD_STAMP_RED.b;
+  }
+  return output;
+}
+
+function displayFromAnalysis(analysis: StampAnalysis, colorMode: StampColorMode, isPreviewOnly = false): StampDisplay {
+  const fullOutputImageData = colorizeStampImageData(analysis.outputImageData, colorMode);
   return {
     sourceImageData: analysis.sourceImageData,
-    fullOutputImageData: analysis.outputImageData,
-    crop: analysis.crop,
+    rawOutputImageData: analysis.outputImageData,
+    fullOutputImageData,
+    crop: copyCropFromRect(fullOutputImageData, analysis.crop),
     width: analysis.width,
     height: analysis.height,
     confidence: analysis.confidence,
@@ -301,6 +319,7 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
   const [outputMode, setOutputMode] = useState<StampOutputMode>('crop');
   const [previewBackground, setPreviewBackground] = useState<PreviewBackground>('transparent');
   const [editorMode, setEditorMode] = useState<EditorMode>('erase');
+  const [colorMode, setColorMode] = useState<StampColorMode>('original');
   const [brushSize, setBrushSize] = useState(42);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -447,10 +466,12 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
           setProgressLabel(label);
         },
         (preview) => {
+          const fullOutputImageData = colorizeStampImageData(preview.outputImageData, colorMode);
           setDisplay({
             sourceImageData: preview.outputImageData,
-            fullOutputImageData: preview.outputImageData,
-            crop: preview.crop,
+            rawOutputImageData: preview.outputImageData,
+            fullOutputImageData,
+            crop: copyCropFromRect(fullOutputImageData, preview.crop),
             width: preview.width,
             height: preview.height,
             confidence: preview.confidence,
@@ -469,7 +490,7 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
         const sourceBlob = await imageDataToPngBlob(analysis.sourceImageData);
         setSourceUrl(URL.createObjectURL(sourceBlob));
       }
-      setDisplay(displayFromAnalysis(analysis));
+      setDisplay(displayFromAnalysis(analysis, colorMode));
       setPhase('done');
       setProgress(100);
       setProgressLabel('处理完成');
@@ -515,6 +536,7 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
     const fullY = outputMode === 'crop' ? current.crop.y + localY : localY;
     const source = current.sourceImageData.data;
     const output = current.fullOutputImageData.data;
+    const rawOutput = current.rawOutputImageData.data;
     const radius = Math.max(2, (brushSize / 2) * Math.max(1, Math.max(current.width, current.height) / 1200));
     const left = Math.max(0, Math.floor(fullX - radius));
     const right = Math.min(current.width - 1, Math.ceil(fullX + radius));
@@ -529,12 +551,23 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
         if (editorMode === 'erase') {
           const strength = distance > 0.74 ? (1 - distance) / 0.26 : 1;
           output[pixelIndex + 3] = Math.round(output[pixelIndex + 3] * (1 - strength));
+          rawOutput[pixelIndex + 3] = Math.round(rawOutput[pixelIndex + 3] * (1 - strength));
         } else {
           // Restoring from the source must not reintroduce document text.
           if (isBlackPixel(source[pixelIndex], source[pixelIndex + 1], source[pixelIndex + 2])) continue;
-          output[pixelIndex] = source[pixelIndex];
-          output[pixelIndex + 1] = source[pixelIndex + 1];
-          output[pixelIndex + 2] = source[pixelIndex + 2];
+          rawOutput[pixelIndex] = source[pixelIndex];
+          rawOutput[pixelIndex + 1] = source[pixelIndex + 1];
+          rawOutput[pixelIndex + 2] = source[pixelIndex + 2];
+          rawOutput[pixelIndex + 3] = source[pixelIndex + 3];
+          if (colorMode === 'standard') {
+            output[pixelIndex] = STANDARD_STAMP_RED.r;
+            output[pixelIndex + 1] = STANDARD_STAMP_RED.g;
+            output[pixelIndex + 2] = STANDARD_STAMP_RED.b;
+          } else {
+            output[pixelIndex] = source[pixelIndex];
+            output[pixelIndex + 1] = source[pixelIndex + 1];
+            output[pixelIndex + 2] = source[pixelIndex + 2];
+          }
           output[pixelIndex + 3] = source[pixelIndex + 3];
         }
       }
@@ -546,7 +579,7 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
     if (!display || display.isPreviewOnly) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     paintingRef.current = true;
-    historyRef.current = [...historyRef.current, new Uint8ClampedArray(display.fullOutputImageData.data)].slice(-8);
+    historyRef.current = [...historyRef.current, new Uint8ClampedArray(display.rawOutputImageData.data)].slice(-8);
     redoRef.current = [];
     setCanUndo(true);
     setCanRedo(false);
@@ -563,10 +596,12 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
   const restoreSnapshot = (snapshot: Uint8ClampedArray) => {
     const current = displayRef.current;
     if (!current) return;
-    const nextData = new ImageData(new Uint8ClampedArray(snapshot), current.width, current.height);
+    const nextRawData = new ImageData(new Uint8ClampedArray(snapshot), current.width, current.height);
+    const nextData = colorizeStampImageData(nextRawData, colorMode);
     const nextDisplay = {
       ...current,
       fullOutputImageData: nextData,
+      rawOutputImageData: nextRawData,
       crop: copyCropFromRect(nextData, current.crop),
       version: current.version + 1,
     };
@@ -578,7 +613,7 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
     const current = displayRef.current;
     const previous = historyRef.current.pop();
     if (!current || !previous) return;
-    redoRef.current.push(new Uint8ClampedArray(current.fullOutputImageData.data));
+    redoRef.current.push(new Uint8ClampedArray(current.rawOutputImageData.data));
     restoreSnapshot(previous);
     setCanUndo(historyRef.current.length > 0);
     setCanRedo(true);
@@ -588,10 +623,25 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
     const next = redoRef.current.pop();
     const current = displayRef.current;
     if (!current || !next) return;
-    historyRef.current.push(new Uint8ClampedArray(current.fullOutputImageData.data));
+    historyRef.current.push(new Uint8ClampedArray(current.rawOutputImageData.data));
     restoreSnapshot(next);
     setCanUndo(true);
     setCanRedo(redoRef.current.length > 0);
+  };
+
+  const handleColorModeChange = (nextMode: StampColorMode) => {
+    const current = displayRef.current;
+    setColorMode(nextMode);
+    if (!current) return;
+    const nextOutput = colorizeStampImageData(current.rawOutputImageData, nextMode);
+    const nextDisplay = {
+      ...current,
+      fullOutputImageData: nextOutput,
+      crop: copyCropFromRect(nextOutput, current.crop),
+      version: current.version + 1,
+    };
+    displayRef.current = nextDisplay;
+    setDisplay(nextDisplay);
   };
 
   const resetTask = () => {
@@ -679,6 +729,21 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
                 {(['transparent', 'white', 'black', 'gray'] as PreviewBackground[]).map((background) => (
                   <button key={background} className={`stamp-background-button bg-${background} ${previewBackground === background ? 'is-active' : ''}`} type="button" role="tab" aria-selected={previewBackground === background} aria-label={`${background} 背景`} onClick={() => setPreviewBackground(background)} />
                 ))}
+              </div>
+              <div className="stamp-option-group stamp-color-option">
+                <span className="section-label">色彩</span>
+                <button
+                  className={`stamp-color-toggle ${colorMode === 'standard' ? 'is-active' : ''}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={colorMode === 'standard'}
+                  aria-label="优化公章色彩"
+                  onClick={() => handleColorModeChange(colorMode === 'standard' ? 'original' : 'standard')}
+                >
+                  <i className="stamp-color-swatch" aria-hidden="true" />
+                  {colorMode === 'standard' ? '已优化' : '优化公章色彩'}
+                </button>
+                <small className="stamp-color-code">#AF1414</small>
               </div>
             </div>
 
