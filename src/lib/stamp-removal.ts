@@ -99,6 +99,27 @@ function rgbToHsv(r: number, g: number, b: number) {
   };
 }
 
+/**
+ * Black/gray document text must never become part of a red stamp mask.
+ *
+ * Pure black has an undefined hue. Browsers expose that hue as 0, which is
+ * the red end of the HSV wheel and is why the old red-affinity calculation
+ * could accidentally keep black text. Keep this check based on brightness
+ * and chroma instead of hue so dark red stamp ink is still allowed through.
+ */
+export function isBlackPixel(r: number, g: number, b: number) {
+  const maxChannel = Math.max(r, g, b);
+  const minChannel = Math.min(r, g, b);
+  const channelSpread = maxChannel - minChannel;
+  const value = maxChannel / 255;
+  const saturation = maxChannel === 0 ? 0 : channelSpread / maxChannel;
+  const isDarkNeutral = saturation < 0.24 && value < 0.72;
+  // Allow dark, saturated red ink (for example 100/30/30) to remain. The
+  // fallback only covers nearly neutral black pixels with a small color cast.
+  const isNearBlack = maxChannel <= 120 && channelSpread <= 32;
+  return isDarkNeutral || isNearBlack;
+}
+
 function pivotRgb(value: number) {
   const normalized = value / 255;
   return normalized <= 0.04045
@@ -179,6 +200,9 @@ function buildStampMask(imageData: ImageData, onProgress?: (progress: number) =>
       const r = data[index];
       const g = data[index + 1];
       const b = data[index + 2];
+      // Do this before the hue-based red test. Otherwise black text can be
+      // interpreted as red because its HSV hue defaults to zero.
+      if (isBlackPixel(r, g, b)) continue;
       const hsv = rgbToHsv(r, g, b);
       const lab = rgbToLab(r, g, b);
       const hueScore = smoothstep(0.16, 0, hueDistanceToRed(hsv.hue));
@@ -252,6 +276,12 @@ function buildStampMask(imageData: ImageData, onProgress?: (progress: number) =>
       const originalR = data[index];
       const originalG = data[index + 1];
       const originalB = data[index + 2];
+      // Final safety net: no detected black/gray document pixel may survive
+      // in the exported transparent image, including partially opaque edges.
+      if (isBlackPixel(originalR, originalG, originalB)) {
+        output.data[index + 3] = 0;
+        continue;
+      }
       // Solve the simple compositing equation at translucent edges to remove white paper spill.
       // The center remains byte-for-byte from the source image.
       if (a < 0.93) {

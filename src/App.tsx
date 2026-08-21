@@ -5,6 +5,7 @@ import {
 } from 'framer-motion';
 import {
   Check,
+  Camera,
   ChevronDown,
   CircleAlert,
   Clock3,
@@ -49,18 +50,72 @@ import mammoth from 'mammoth';
 import { jsPDF } from 'jspdf';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Footer } from './components/Footer';
+import { PhotoScanTool, PhotoScanToolHandle, PhotoScanToolState } from './components/PhotoScanTool';
 import { StampTool, StampToolHandle } from './components/StampTool';
+import { MenuBar } from './components/ui/glow-menu';
+import type { GlowMenuAccent, GlowMenuItem } from './components/ui/glow-menu';
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const brandMarkUrl = `${import.meta.env.BASE_URL}zhiluo-icons/zhiluo-mark-ai-v1.png`;
 
-type Mode = 'merge' | 'compress' | 'convert' | 'stamp';
+type Mode = 'merge' | 'compress' | 'convert' | 'scan' | 'stamp';
 type ToastKind = 'error' | 'success' | 'info';
 type ConvertFormat = 'pdf' | 'image';
 type ConversionKind = 'word' | 'pdf' | 'image';
+
+const modeAccents: Record<Mode, GlowMenuAccent> = {
+  merge: {
+    accent: '#146ef5',
+    hover: '#0b5bd3',
+    glow: 'radial-gradient(ellipse at 34% center, rgba(20, 110, 245, 0.26) 0%, rgba(20, 110, 245, 0.12) 43%, rgba(20, 110, 245, 0) 78%)',
+    soft: '#f1f6ff',
+    border: '#cfe0ff',
+    rgb: '20, 110, 245',
+  },
+  compress: {
+    accent: '#ea580c',
+    hover: '#c2410c',
+    glow: 'radial-gradient(ellipse at 34% center, rgba(234, 88, 12, 0.30) 0%, rgba(234, 88, 12, 0.13) 43%, rgba(234, 88, 12, 0) 78%)',
+    soft: '#fff4e8',
+    border: '#ffd1ad',
+    rgb: '234, 88, 12',
+  },
+  convert: {
+    accent: '#7c3aed',
+    hover: '#6d28d9',
+    glow: 'radial-gradient(ellipse at 34% center, rgba(124, 58, 237, 0.30) 0%, rgba(124, 58, 237, 0.13) 43%, rgba(124, 58, 237, 0) 78%)',
+    soft: '#f5f0ff',
+    border: '#d9c7ff',
+    rgb: '124, 58, 237',
+  },
+  scan: {
+    accent: '#059669',
+    hover: '#047857',
+    glow: 'radial-gradient(ellipse at 34% center, rgba(5, 150, 105, 0.28) 0%, rgba(5, 150, 105, 0.12) 43%, rgba(5, 150, 105, 0) 78%)',
+    soft: '#ebfbf5',
+    border: '#b7ead6',
+    rgb: '5, 150, 105',
+  },
+  stamp: {
+    accent: '#e11d48',
+    hover: '#be123c',
+    glow: 'radial-gradient(ellipse at 34% center, rgba(225, 29, 72, 0.30) 0%, rgba(225, 29, 72, 0.13) 43%, rgba(225, 29, 72, 0) 78%)',
+    soft: '#fff0f3',
+    border: '#ffc4d0',
+    rgb: '225, 29, 72',
+  },
+};
+
+const toolMenuItems: GlowMenuItem<Mode>[] = [
+  { id: 'merge', label: '合并 PDF', icon: Combine, description: '将多个 PDF 合并为一个文件', accent: modeAccents.merge },
+  { id: 'compress', label: '压缩 PDF', icon: Minimize2, description: '减小 PDF 文件体积', accent: modeAccents.compress },
+  { id: 'convert', label: '格式转换', icon: FileOutput, description: '在 Word、PDF 和图片之间转换', accent: modeAccents.convert },
+  { id: 'scan', label: '照片扫描', icon: Camera, description: '将拍摄的纸张整理成扫描件', accent: modeAccents.scan },
+  { id: 'stamp', label: '公章抠图', icon: Stamp, description: '提取图片或 PDF 中的公章', accent: modeAccents.stamp },
+];
 
 type PdfItem = {
   id: string;
@@ -175,6 +230,7 @@ function getModeLabel(mode: Mode) {
   if (mode === 'merge') return '合并 PDF';
   if (mode === 'compress') return '压缩 PDF';
   if (mode === 'convert') return '格式转换';
+  if (mode === 'scan') return '照片扫描';
   return '公章抠图';
 }
 
@@ -981,6 +1037,7 @@ function OutputPanel({
 function App() {
   const shouldReduceMotion = useReducedMotion();
   const [mode, setMode] = useState<Mode>('merge');
+  const activeAccent = modeAccents[mode];
   const [mergeItems, setMergeItems] = useState<PdfItem[]>([]);
   const [compressItems, setCompressItems] = useState<PdfItem[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -992,11 +1049,13 @@ function App() {
   const [conversionItem, setConversionItem] = useState<ConversionItem | null>(null);
   const [conversionFormat, setConversionFormat] = useState<ConvertFormat>('pdf');
   const [conversionResult, setConversionResult] = useState<ConversionOutput | null>(null);
+  const [photoScanState, setPhotoScanState] = useState<PhotoScanToolState>({ hasSource: false, pageCount: 0, hasResult: false });
   const [stampState, setStampState] = useState({ hasImage: false, hasResult: false });
   const [targetDraft, setTargetDraft] = useState('');
   const [targetUnit, setTargetUnit] = useState<'KB' | 'MB'>('MB');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const photoScanToolRef = useRef<PhotoScanToolHandle | null>(null);
   const stampToolRef = useRef<StampToolHandle | null>(null);
   const operationIdRef = useRef(0);
   const toastId = useRef(0);
@@ -1006,15 +1065,19 @@ function App() {
   );
 
   const activeItems = mode === 'merge' ? mergeItems : compressItems;
-  const activeItemCount = mode === 'stamp'
-    ? (stampState.hasImage ? 1 : 0)
-    : mode === 'convert' ? (conversionItem ? 1 : 0) : activeItems.length;
+  const activeItemCount = mode === 'scan'
+    ? (photoScanState.hasSource || photoScanState.pageCount > 0 ? 1 : 0)
+    : mode === 'stamp'
+      ? (stampState.hasImage ? 1 : 0)
+      : mode === 'convert' ? (conversionItem ? 1 : 0) : activeItems.length;
   const activeResult = mode === 'merge'
     ? mergeResult
     : mode === 'compress'
       ? compressResult
       : mode === 'convert' ? conversionResult : null;
-  const activeHasResult = mode === 'stamp' ? stampState.hasResult : Boolean(activeResult);
+  const activeHasResult = mode === 'scan'
+    ? photoScanState.hasResult
+    : mode === 'stamp' ? stampState.hasResult : Boolean(activeResult);
   const compressItem = compressItems[0];
   const targetBytes = compressItem ? parseTargetSize(targetDraft, targetUnit) : null;
   const targetError = compressItem && targetDraft && !targetBytes
@@ -1022,13 +1085,15 @@ function App() {
     : compressItem && targetBytes && targetBytes >= compressItem.size
       ? '目标大小必须小于原始文件 '
       : null;
-  const canProcess = mode === 'stamp'
+  const canProcess = mode === 'scan'
     ? false
-    : mode === 'merge'
-    ? mergeItems.length >= 2
-    : mode === 'compress'
-      ? Boolean(compressItem && targetBytes && targetBytes < compressItem.size)
-      : Boolean(conversionItem);
+    : mode === 'stamp'
+      ? false
+      : mode === 'merge'
+        ? mergeItems.length >= 2
+        : mode === 'compress'
+          ? Boolean(compressItem && targetBytes && targetBytes < compressItem.size)
+          : Boolean(conversionItem);
 
   const totalPages = useMemo(
     () => mergeItems.reduce((sum, item) => sum + item.pages, 0),
@@ -1154,6 +1219,10 @@ function App() {
       return;
     }
 
+    if (mode === 'scan') {
+      photoScanToolRef.current?.uploadFiles(event.dataTransfer.files);
+      return;
+    }
     if (mode === 'stamp') {
       stampToolRef.current?.uploadFiles(event.dataTransfer.files);
       return;
@@ -1288,6 +1357,15 @@ function App() {
   return (
     <div
       className="app-shell"
+      data-mode={mode}
+      style={{
+        '--accent': activeAccent.accent,
+        '--accent-hover': activeAccent.hover,
+        '--accent-glow': activeAccent.glow,
+        '--accent-soft': activeAccent.soft,
+        '--accent-border': activeAccent.border,
+        '--accent-rgb': activeAccent.rgb,
+      } as CSSProperties}
       onDragEnter={handlePageDragEnter}
       onDragOver={handlePageDragOver}
       onDragLeave={handlePageDragLeave}
@@ -1309,24 +1387,13 @@ function App() {
             <em>从这里开始</em>
           </h1>
           <p className="intro-copy">合并、压缩、转换或抠图文件。无需账号，文件始终留在你的设备。</p>
-          <div className={`mode-switch intro-mode-switch mode-${mode}`} role="tablist" aria-label="文件操作">
-            <button className={mode === 'merge' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'merge'} onClick={() => switchMode('merge')}>
-              <Combine size={20} strokeWidth={1.8} aria-hidden="true" />
-              <span>合并 PDF</span>
-            </button>
-            <button className={mode === 'compress' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'compress'} onClick={() => switchMode('compress')}>
-              <Minimize2 size={20} strokeWidth={1.8} aria-hidden="true" />
-              <span>压缩 PDF</span>
-            </button>
-            <button className={mode === 'convert' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'convert'} onClick={() => switchMode('convert')}>
-              <FileOutput size={20} strokeWidth={1.8} aria-hidden="true" />
-              <span>格式转换</span>
-            </button>
-            <button className={mode === 'stamp' ? 'is-active' : ''} type="button" role="tab" aria-selected={mode === 'stamp'} onClick={() => switchMode('stamp')}>
-              <Stamp size={20} strokeWidth={1.8} aria-hidden="true" />
-              <span>公章抠图</span>
-            </button>
-          </div>
+          <MenuBar
+            className="intro-mode-menu"
+            items={toolMenuItems}
+            activeItem={mode}
+            onItemClick={switchMode}
+            aria-label="文件操作"
+          />
         </section>
 
         <section className="workspace-card" id="workspace" aria-label="文件工作区">
@@ -1337,8 +1404,8 @@ function App() {
                 <span>当前工具</span>
               </div>
               <div>
-                <h2>{mode === 'merge' ? '合并 PDF' : mode === 'compress' ? '压缩 PDF' : mode === 'convert' ? '格式转换' : '公章抠图'}</h2>
-                <p>{mode === 'merge' ? '把多个文件按顺序合成一个 PDF。页面内容保持原样。' : mode === 'compress' ? '设定目标大小，减少文件体积，方便发送与存档。' : mode === 'convert' ? '在 Word、PDF 和图片之间转换，适合打印与分享。' : '自动寻找图片或 PDF 页面中的公章，放大并分离纸张背景，输出透明 PNG。'}</p>
+                <h2>{mode === 'merge' ? '合并 PDF' : mode === 'compress' ? '压缩 PDF' : mode === 'convert' ? '格式转换' : mode === 'scan' ? '照片扫描' : '公章抠图'}</h2>
+                <p>{mode === 'merge' ? '把多个文件按顺序合成一个 PDF。页面内容保持原样。' : mode === 'compress' ? '设定目标大小，减少文件体积，方便发送与存档。' : mode === 'convert' ? '在 Word、PDF 和图片之间转换，适合打印与分享。' : mode === 'scan' ? '把手机拍的纸张变成平整、清晰的扫描件，再导出多页 PDF。' : '自动寻找图片或 PDF 页面中的公章，放大并分离纸张背景，输出透明 PNG。'}</p>
               </div>
               <div className="tool-steps" aria-label="处理流程">
                 <ToolStep
@@ -1350,7 +1417,7 @@ function App() {
                 <ToolStep
                   number="02"
                   title="设置参数"
-                  description={mode === 'merge' ? '确认文件顺序' : mode === 'compress' ? '调整目标大小' : mode === 'convert' ? '选择输出格式' : '定位并查看透明结果'}
+                  description={mode === 'merge' ? '确认文件顺序' : mode === 'compress' ? '调整目标大小' : mode === 'convert' ? '选择输出格式' : mode === 'scan' ? '调整四角与扫描效果' : '定位并查看透明结果'}
                   status={activeHasResult ? 'complete' : activeItemCount ? 'current' : 'upcoming'}
                 />
                 <ToolStep
@@ -1370,7 +1437,9 @@ function App() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={shouldReduceMotion ? { duration: 0 } : { duration: 0.22, ease }}
               >
-                  {mode === 'stamp' ? (
+                  {mode === 'scan' ? (
+                    <PhotoScanTool ref={photoScanToolRef} isDragging={isDragging} onStateChange={setPhotoScanState} />
+                  ) : mode === 'stamp' ? (
                     <StampTool ref={stampToolRef} isDragging={isDragging} onStateChange={setStampState} />
                   ) : (
                   <div className="mode-content">

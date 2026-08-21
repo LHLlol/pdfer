@@ -20,6 +20,7 @@ import {
   StampSourceKind,
   cropStampImageData,
   imageDataToPngBlob,
+  isBlackPixel,
   processStampFile,
 } from '../lib/stamp-removal';
 
@@ -529,6 +530,8 @@ export const StampTool = forwardRef<StampToolHandle, StampToolProps>(function St
           const strength = distance > 0.74 ? (1 - distance) / 0.26 : 1;
           output[pixelIndex + 3] = Math.round(output[pixelIndex + 3] * (1 - strength));
         } else {
+          // Restoring from the source must not reintroduce document text.
+          if (isBlackPixel(source[pixelIndex], source[pixelIndex + 1], source[pixelIndex + 2])) continue;
           output[pixelIndex] = source[pixelIndex];
           output[pixelIndex + 1] = source[pixelIndex + 1];
           output[pixelIndex + 2] = source[pixelIndex + 2];
